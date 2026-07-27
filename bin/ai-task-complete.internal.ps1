@@ -41,6 +41,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+$utf8 = [System.Text.UTF8Encoding]::new($false)
+[Console]::InputEncoding = $utf8
+[Console]::OutputEncoding = $utf8
+$OutputEncoding = $utf8
+
 function Limit-Text {
     param([AllowNull()][string]$Value, [int]$MaxLength)
     if ([string]::IsNullOrWhiteSpace($Value)) { return '' }

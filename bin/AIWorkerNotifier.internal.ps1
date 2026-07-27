@@ -12,6 +12,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+$utf8 = [System.Text.UTF8Encoding]::new($false)
+[Console]::InputEncoding = $utf8
+[Console]::OutputEncoding = $utf8
+$OutputEncoding = $utf8
+
 $script:RuntimeRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'AIWorkerNotifier'
 $script:StartedAtUtc = [DateTime]::UtcNow
 $script:LogPath = Join-Path $script:RuntimeRoot 'logs\notifier.log'
@@ -183,19 +188,37 @@ function Send-DiscordEvent {
     $webhook = Get-WebhookUrl
     $roleId = Get-DiscordMentionRoleId -Path $script:MentionRolePath
     $payloadObject = New-DiscordWebhookPayloadObject -Message $message -RoleId $roleId
-    $payloadBytes = ConvertTo-Utf8JsonBytes -PayloadObject $payloadObject
+    $payloadBytes = [byte[]](ConvertTo-Utf8JsonBytes -PayloadObject $payloadObject)
     $lastError = $null
+
+    [Net.ServicePointManager]::SecurityProtocol = `
+        [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
     for ($attempt = 1; $attempt -le [Math]::Max(1, $MaxSendAttempts); $attempt++) {
         try {
-            Invoke-RestMethod `
+            $response = Invoke-WebRequest `
                 -Method Post `
                 -Uri $webhook `
                 -ContentType 'application/json; charset=utf-8' `
                 -Body $payloadBytes `
-                -TimeoutSec $RequestTimeoutSeconds | Out-Null
-            return
+                -TimeoutSec $RequestTimeoutSeconds `
+                -UseBasicParsing
+
+            $statusCode = [int]$response.StatusCode
+            if ($statusCode -ge 200 -and $statusCode -lt 300) {
+                return
+            }
+
+            throw "Unexpected Discord HTTP status: $statusCode"
         } catch {
+            $statusCode = $null
+            if ($_.Exception.Response) {
+                try { $statusCode = [int]$_.Exception.Response.StatusCode } catch { }
+            }
+            if ($statusCode -eq 204) {
+                return
+            }
+
             $lastError = $_
             if ($attempt -lt $MaxSendAttempts) { Start-Sleep -Seconds 2 }
         }

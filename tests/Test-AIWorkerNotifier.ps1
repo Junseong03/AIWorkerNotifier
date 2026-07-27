@@ -66,6 +66,8 @@ Assert-True (-not ($plain.Keys -contains 'allowed_mentions')) 'allowed_mentions 
 Assert-True ($plain.content -notmatch '^<@&') 'plain content started with mention'
 $plainJson = [Text.Encoding]::UTF8.GetString((ConvertTo-Utf8JsonBytes -PayloadObject $plain))
 Assert-True ($plainJson -notmatch 'allowed_mentions') 'plain JSON includes allowed_mentions'
+$plainBytes = ConvertTo-Utf8JsonBytes -PayloadObject $plain
+Assert-True ($plainBytes -is [byte[]]) 'ConvertTo-Utf8JsonBytes must return byte[] (not Object[])'
 Write-Host 'PASS: payload without role ID'
 
 # ---------------------------------------------------------------------------
@@ -82,6 +84,28 @@ $withJson = [Text.Encoding]::UTF8.GetString((ConvertTo-Utf8JsonBytes -PayloadObj
 Assert-True ($withJson -match '"parse"\s*:\s*\[\s*\]') 'JSON parse must be []'
 Assert-True ($withJson -match ('"roles"\s*:\s*\[\s*"' + [regex]::Escape($roleId) + '"\s*\]')) 'JSON roles must be single-id array'
 Write-Host 'PASS: payload with role ID + allowed_mentions'
+
+# ---------------------------------------------------------------------------
+# Payload with user mention / @everyone
+# ---------------------------------------------------------------------------
+$userId = '987654321098765432'
+$withUser = New-DiscordWebhookPayloadObject -Message $message -UserId $userId
+Assert-True ($withUser.content.StartsWith("<@$userId>")) 'content missing user mention prefix'
+Assert-True (@($withUser.allowed_mentions.parse).Count -eq 0) 'user parse must be empty'
+$users = @($withUser.allowed_mentions.users)
+Assert-True ($users.Count -eq 1 -and $users[0] -eq $userId) 'users must contain only configured ID'
+$userJson = [Text.Encoding]::UTF8.GetString((ConvertTo-Utf8JsonBytes -PayloadObject $withUser))
+Assert-True ($userJson -match ('"users"\s*:\s*\[\s*"' + [regex]::Escape($userId) + '"\s*\]')) 'JSON users must be single-id array'
+Assert-True ($userJson -notmatch '"roles"') 'user payload must not include roles'
+
+$withEveryone = New-DiscordWebhookPayloadObject -Message $message -MentionEveryone
+Assert-True ($withEveryone.content.StartsWith('@everyone')) 'content missing @everyone prefix'
+Assert-True (@($withEveryone.allowed_mentions.parse)[0] -eq 'everyone') 'parse must include everyone'
+$everyoneJson = [Text.Encoding]::UTF8.GetString((ConvertTo-Utf8JsonBytes -PayloadObject $withEveryone))
+Assert-True ($everyoneJson -match '"parse"\s*:\s*\[\s*"everyone"\s*\]') 'JSON parse must be ["everyone"]'
+Assert-True ($everyoneJson -notmatch '"roles"') 'everyone payload must not include roles'
+Assert-True ($everyoneJson -notmatch '"users"') 'everyone payload must not include users'
+Write-Host 'PASS: user + @everyone mentions'
 
 # ---------------------------------------------------------------------------
 # UTF-8 JSON round-trip (PowerShell -> JSON bytes -> object)

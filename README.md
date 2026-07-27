@@ -27,18 +27,23 @@ C:\dev\SW\AIWorkerNotifier
 AIWorkerNotifier-Setup.bat
 ```
 
-CMD 메뉴에서 다음 작업을 선택할 수 있습니다.
+`AIWorkerNotifier-Setup.bat`는 UTF-8(`chcp 65001`) launcher이며, 실제 한글 메뉴는 `scripts\manage-setup.ps1`이 그립니다.
 
 ```text
-1. 현재 사용자의 PATH에 AIWorkerNotifier\bin 등록
-2. 현재 사용자의 PATH에서 AIWorkerNotifier\bin 제거
-3. Discord Webhook 설정 또는 교체
-4. 저장된 Discord Webhook 제거
-5. Discord mention role 설정
-6. Discord mention role 제거
-7. 상세 상태 보기
-8. 종료
+알림 전달   ON/OFF
+Webhook     연결됨/없음
+역할 멘션   설정됨/없음
+
+1. 알림 전달 ON/OFF
+2. Webhook 설정
+3. 역할 멘션 설정
+4. 알림 테스트
+   - 멘션 없음 / @역할 / @사용자 / @everyone
+5. 명령 등록
+0. 나가기
 ```
+
+**알림 전달**을 ON 하면 백그라운드에서 작업 결과를 Discord로 보냅니다. 새 창을 띄우지 않습니다.
 
 PATH 제거는 프로그램 파일이나 `%LOCALAPPDATA%\AIWorkerNotifier` 실행 데이터를 삭제하지 않습니다. PATH를 변경한 뒤에는 새 PowerShell 또는 새 Cursor CLI 세션을 열어야 합니다.
 
@@ -88,7 +93,7 @@ AIWorkerNotifier -DryRun -Once -Backlog
 - 필드 길이 제한과 기본 sanitization
 - runtime cleanup 및 크기 제한
 - DPAPI 사용자 범위 Webhook 저장
-- 한글 CMD 설정 메뉴 (`AIWorkerNotifier-Setup.bat`)
+- 한글 설정 메뉴 (`AIWorkerNotifier-Setup.bat` → `scripts\manage-setup.ps1`, UTF-8)
 - PATH 설치/제거 스크립트
 
 후속 범위:
