@@ -1,4 +1,4 @@
-﻿Set-StrictMode -Version Latest
+Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 # ---------------------------------------------------------------------------
@@ -19,6 +19,10 @@ $NotifierCommandFile = Join-Path $BinDirectory 'AIWorkerNotifier.cmd'
 $RuntimeRoot = Join-Path $env:LOCALAPPDATA 'AIWorkerNotifier'
 $StateDirectory = Join-Path $RuntimeRoot 'state'
 $WebhookFile = Join-Path $StateDirectory 'discord-webhook.dpapi'
+$MentionRoleFile = Join-Path $StateDirectory 'discord-mention-role.id'
+$PayloadHelperPath = Join-Path $BinDirectory 'DiscordPayload.ps1'
+
+. $PayloadHelperPath
 
 function Pause-Setup {
     Write-Host
@@ -296,37 +300,86 @@ function Remove-DiscordWebhook {
     Write-Host
     Write-Host '[OK] Removed the locally stored Webhook credential.'
 }
+function Set-DiscordMentionRole {
+    Write-Host
+    Write-Host 'Enter the Discord role snowflake (digits only).'
+    Write-Host 'Do not paste a Webhook URL, role name, or <@&...> markup.'
+    Write-Host 'The value is stored in the local runtime state directory.'
+    Write-Host
+
+    $rawValue = Read-Host 'Discord mention role ID'
+
+    if ([string]::IsNullOrWhiteSpace($rawValue)) {
+        Write-Host
+        Write-Host '[CANCELLED] No value was entered.'
+        return
+    }
+
+    $roleId = ConvertTo-DiscordMentionRoleId -Value $rawValue
+
+    New-Item -ItemType Directory -Path $StateDirectory -Force | Out-Null
+
+    $temporaryFile = Join-Path $StateDirectory (
+        'discord-mention-role.{0}.tmp' -f [Guid]::NewGuid().ToString('N')
+    )
+
+    try {
+        [IO.File]::WriteAllText(
+            $temporaryFile,
+            $roleId,
+            [Text.UTF8Encoding]::new($false)
+        )
+        Move-Item -LiteralPath $temporaryFile -Destination $MentionRoleFile -Force
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporaryFile) {
+            Remove-Item -LiteralPath $temporaryFile -Force
+        }
+    }
+
+    Write-Host
+    Write-Host '[OK] Discord mention role ID was saved.'
+    Write-Host "     $MentionRoleFile"
+    Write-Host '     (numeric ID only; value is not printed)'
+}
+
+function Remove-DiscordMentionRole {
+    if (-not (Test-Path -LiteralPath $MentionRoleFile -PathType Leaf)) {
+        Write-Host
+        Write-Host '[INFO] No stored Discord mention role was found.'
+        return
+    }
+
+    Write-Host
+    Write-Host 'This removes only the locally stored role ID.'
+    Write-Host 'It does not delete the role from Discord.'
+    Write-Host
+
+    $confirmation = Read-Host 'Type REMOVE to continue'
+    if ($confirmation -cne 'REMOVE') {
+        Write-Host
+        Write-Host '[CANCELLED] The stored mention role was not removed.'
+        return
+    }
+
+    Remove-Item -LiteralPath $MentionRoleFile -Force
+    Write-Host
+    Write-Host '[OK] Removed the locally stored mention role ID.'
+}
+
+function Get-MentionRoleStatus {
+    $roleId = Get-DiscordMentionRoleId -Path $MentionRoleFile
+    if ($null -ne $roleId) { return 'CONFIGURED' }
+    if (Test-Path -LiteralPath $MentionRoleFile -PathType Leaf) { return 'INVALID' }
+    return 'NOT CONFIGURED'
+}
 
 function Show-SetupStatus {
-    $pathStatus = if (Test-BinPathRegistered) {
-        'REGISTERED'
-    }
-    else {
-        'NOT REGISTERED'
-    }
-
-    $webhookStatus = if (Test-Path -LiteralPath $WebhookFile -PathType Leaf) {
-        'CONFIGURED'
-    }
-    else {
-        'NOT CONFIGURED'
-    }
-
-    $cliStatus = if (Test-Path -LiteralPath $CliCommandFile -PathType Leaf) {
-        'FOUND'
-    }
-    else {
-        'MISSING'
-    }
-
-    $notifierStatus = if (
-        Test-Path -LiteralPath $NotifierCommandFile -PathType Leaf
-    ) {
-        'FOUND'
-    }
-    else {
-        'MISSING'
-    }
+    $pathStatus = if (Test-BinPathRegistered) { 'REGISTERED' } else { 'NOT REGISTERED' }
+    $webhookStatus = if (Test-Path -LiteralPath $WebhookFile -PathType Leaf) { 'CONFIGURED' } else { 'NOT CONFIGURED' }
+    $mentionStatus = Get-MentionRoleStatus
+    $cliStatus = if (Test-Path -LiteralPath $CliCommandFile -PathType Leaf) { 'FOUND' } else { 'MISSING' }
+    $notifierStatus = if (Test-Path -LiteralPath $NotifierCommandFile -PathType Leaf) { 'FOUND' } else { 'MISSING' }
 
     Write-Host
     Write-Host 'Current status'
@@ -335,28 +388,18 @@ function Show-SetupStatus {
     Write-Host "Command directory: $BinDirectory"
     Write-Host "User PATH        : $pathStatus"
     Write-Host "Webhook          : $webhookStatus"
+    Write-Host "Mention role     : $mentionStatus"
     Write-Host "CLI command      : $cliStatus"
     Write-Host "Notifier command : $notifierStatus"
     Write-Host "Runtime root     : $RuntimeRoot"
 }
 
 function Show-Menu {
-    $pathStatus = if (Test-BinPathRegistered) {
-        'REGISTERED'
-    }
-    else {
-        'NOT REGISTERED'
-    }
-
-    $webhookStatus = if (Test-Path -LiteralPath $WebhookFile -PathType Leaf) {
-        'CONFIGURED'
-    }
-    else {
-        'NOT CONFIGURED'
-    }
+    $pathStatus = if (Test-BinPathRegistered) { 'REGISTERED' } else { 'NOT REGISTERED' }
+    $webhookStatus = if (Test-Path -LiteralPath $WebhookFile -PathType Leaf) { 'CONFIGURED' } else { 'NOT CONFIGURED' }
+    $mentionStatus = Get-MentionRoleStatus
 
     Clear-Host
-
     Write-Host '============================================================'
     Write-Host '                 AI Worker Notifier Setup'
     Write-Host '============================================================'
@@ -364,13 +407,16 @@ function Show-Menu {
     Write-Host "Application: $ApplicationRoot"
     Write-Host "PATH       : $pathStatus"
     Write-Host "Webhook    : $webhookStatus"
+    Write-Host "Mention    : $mentionStatus"
     Write-Host
     Write-Host '  1. Register commands in the current user PATH'
     Write-Host '  2. Remove commands from the current user PATH'
     Write-Host '  3. Configure or replace the Discord Webhook'
     Write-Host '  4. Remove the stored Discord Webhook'
-    Write-Host '  5. Show detailed setup status'
-    Write-Host '  6. Exit'
+    Write-Host '  5. Configure Discord mention role'
+    Write-Host '  6. Remove Discord mention role'
+    Write-Host '  7. Show detailed setup status'
+    Write-Host '  8. Exit'
     Write-Host
     Write-Host 'PATH changes apply to newly opened terminal sessions.'
     Write-Host 'Removing PATH does not delete program files or runtime data.'
@@ -379,55 +425,27 @@ function Show-Menu {
 
 while ($true) {
     Show-Menu
-
-    $selection = Read-Host 'Select an option [1-6]'
+    $selection = Read-Host 'Select an option [1-8]'
 
     try {
         switch ($selection) {
-            '1' {
-                Add-BinPath
-                Pause-Setup
-            }
-
+            '1' { Add-BinPath; Pause-Setup }
             '2' {
                 Write-Host
                 $confirmation = Read-Host 'Remove the command directory from user PATH? [Y/N]'
-
-                if ($confirmation -match '^[Yy]$') {
-                    Remove-BinPath
-                }
-                else {
-                    Write-Host
-                    Write-Host '[CANCELLED] PATH was not changed.'
-                }
-
+                if ($confirmation -match '^[Yy]$') { Remove-BinPath }
+                else { Write-Host; Write-Host '[CANCELLED] PATH was not changed.' }
                 Pause-Setup
             }
-
-            '3' {
-                Set-DiscordWebhook
-                Pause-Setup
-            }
-
-            '4' {
-                Remove-DiscordWebhook
-                Pause-Setup
-            }
-
-            '5' {
-                Show-SetupStatus
-                Pause-Setup
-            }
-
-            '6' {
-                Write-Host
-                Write-Host 'Setup closed.'
-                exit 0
-            }
-
+            '3' { Set-DiscordWebhook; Pause-Setup }
+            '4' { Remove-DiscordWebhook; Pause-Setup }
+            '5' { Set-DiscordMentionRole; Pause-Setup }
+            '6' { Remove-DiscordMentionRole; Pause-Setup }
+            '7' { Show-SetupStatus; Pause-Setup }
+            '8' { Write-Host; Write-Host 'Setup closed.'; exit 0 }
             default {
                 Write-Host
-                Write-Host '[ERROR] Enter a number from 1 to 6.'
+                Write-Host '[ERROR] Enter a number from 1 to 8.'
                 Pause-Setup
             }
         }

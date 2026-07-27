@@ -17,6 +17,10 @@ $script:StartedAtUtc = [DateTime]::UtcNow
 $script:LogPath = Join-Path $script:RuntimeRoot 'logs\notifier.log'
 $script:SentIndexPath = Join-Path $script:RuntimeRoot 'state\sent-index.json'
 $script:WebhookPath = Join-Path $script:RuntimeRoot 'state\discord-webhook.dpapi'
+$script:MentionRolePath = Join-Path $script:RuntimeRoot 'state\discord-mention-role.id'
+$script:PayloadHelperPath = Join-Path $PSScriptRoot 'DiscordPayload.ps1'
+
+. $script:PayloadHelperPath
 
 function Ensure-RuntimeDirectories {
     foreach ($dirName in @('inbox', 'processing', 'failed', 'history', 'state', 'logs')) {
@@ -78,7 +82,7 @@ function Get-WebhookUrl {
 function Load-SentIndex {
     if (-not (Test-Path -LiteralPath $script:SentIndexPath)) { return @{} }
     try {
-        $raw = Get-Content -LiteralPath $script:SentIndexPath -Raw
+        $raw = [System.IO.File]::ReadAllText($script:SentIndexPath, [System.Text.UTF8Encoding]::new($false))
         if ([string]::IsNullOrWhiteSpace($raw)) { return @{} }
         $parsed = $raw | ConvertFrom-Json
         $result = @{}
@@ -177,12 +181,19 @@ function Send-DiscordEvent {
     }
 
     $webhook = Get-WebhookUrl
-    $payload = @{ content = $message; username = 'AI Worker Notifier' } | ConvertTo-Json -Depth 3
+    $roleId = Get-DiscordMentionRoleId -Path $script:MentionRolePath
+    $payloadObject = New-DiscordWebhookPayloadObject -Message $message -RoleId $roleId
+    $payloadBytes = ConvertTo-Utf8JsonBytes -PayloadObject $payloadObject
     $lastError = $null
 
     for ($attempt = 1; $attempt -le [Math]::Max(1, $MaxSendAttempts); $attempt++) {
         try {
-            Invoke-RestMethod -Method Post -Uri $webhook -ContentType 'application/json; charset=utf-8' -Body $payload -TimeoutSec $RequestTimeoutSeconds | Out-Null
+            Invoke-RestMethod `
+                -Method Post `
+                -Uri $webhook `
+                -ContentType 'application/json; charset=utf-8' `
+                -Body $payloadBytes `
+                -TimeoutSec $RequestTimeoutSeconds | Out-Null
             return
         } catch {
             $lastError = $_
@@ -223,6 +234,7 @@ function Cleanup-Runtime {
     foreach ($file in $allFiles) {
         if ($total -le $maxBytes) { break }
         if ($file.FullName -eq $script:WebhookPath) { continue }
+        if ($file.FullName -eq $script:MentionRolePath) { continue }
         $length = $file.Length
         Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue
         $total -= $length
@@ -233,7 +245,8 @@ function Process-OneEvent {
     param([System.IO.FileInfo]$InboxFile, [hashtable]$SentIndex)
     $processing = Move-EventFile -Path $InboxFile.FullName -DirectoryName 'processing'
     try {
-        $event = Get-Content -LiteralPath $processing -Raw | ConvertFrom-Json
+        $eventJson = [System.IO.File]::ReadAllText($processing, [System.Text.UTF8Encoding]::new($false))
+        $event = $eventJson | ConvertFrom-Json
         Validate-Event $event
 
         $createdAt = [DateTime]::Parse([string]$event.createdAtUtc).ToUniversalTime()

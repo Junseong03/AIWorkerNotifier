@@ -10,8 +10,11 @@
 .\scripts\set-discord-webhook.ps1
 ```
 
-6. 휴대폰 Discord 앱에서 서버·채널 음소거를 해제하고 메시지 알림을 켭니다.
-7. Notifier를 실행한 뒤 테스트 이벤트를 만듭니다.
+6. (선택) 멘션할 Discord 역할 ID를 설정합니다. Setup 메뉴의
+   `Configure Discord mention role`을 사용합니다. 숫자 snowflake만 저장하며
+   Webhook URL·역할 이름·`<@&...>` 전체 문자열은 저장하지 않습니다.
+7. 휴대폰 Discord 앱에서 서버·채널 음소거를 해제하고 메시지 알림을 켭니다.
+8. Notifier를 실행한 뒤 테스트 이벤트를 만듭니다.
 
 ```powershell
 AIWorkerNotifier

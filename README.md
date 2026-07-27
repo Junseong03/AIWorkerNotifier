@@ -33,7 +33,11 @@ CMD 메뉴에서 다음 작업을 선택할 수 있습니다.
 1. 현재 사용자의 PATH에 AIWorkerNotifier\bin 등록
 2. 현재 사용자의 PATH에서 AIWorkerNotifier\bin 제거
 3. Discord Webhook 설정 또는 교체
-4. 종료
+4. 저장된 Discord Webhook 제거
+5. Discord mention role 설정
+6. Discord mention role 제거
+7. 상세 상태 보기
+8. 종료
 ```
 
 PATH 제거는 프로그램 파일이나 `%LOCALAPPDATA%\AIWorkerNotifier` 실행 데이터를 삭제하지 않습니다. PATH를 변경한 뒤에는 새 PowerShell 또는 새 Cursor CLI 세션을 열어야 합니다.
@@ -110,6 +114,12 @@ Webhook은 기본적으로 다음 파일에 Windows 사용자 DPAPI로 암호화
 
 ```text
 %LOCALAPPDATA%\AIWorkerNotifier\state\discord-webhook.dpapi
+```
+
+선택적 멘션 역할 ID(숫자만)는 다음 파일에 저장됩니다. Git에 포함하지 않습니다.
+
+```text
+%LOCALAPPDATA%\AIWorkerNotifier\state\discord-mention-role.id
 ```
 
 환경 변수 `AI_WORKER_NOTIFIER_WEBHOOK_URL`이 설정되어 있으면 그 값이 우선합니다.

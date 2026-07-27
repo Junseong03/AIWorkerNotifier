@@ -7,10 +7,11 @@ processing/
 failed/
 history/
 
-# Local secrets
+# Local secrets / local-only config
 *.dpapi
 *.secret
 *.local.json
+*.id
 config.json
 
 # PowerShell temporary files
