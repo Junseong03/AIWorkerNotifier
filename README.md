@@ -1,138 +1,133 @@
-# AI Worker Notifier (PowerShell MVP)
+# AI Worker Notifier
 
-Windows PowerShell 5.1 이상에서 Cursor CLI, Orca, 기타 자동화 작업의 최종 상태를 로컬 이벤트로 기록하고 Discord Webhook으로 전달하는 독립 도구입니다.
+Windows에서 AI/자동화 작업이 끝나면 Discord로 알려 주는 작은 PowerShell 도구입니다.
 
-이 MVP는 다음 두 프로세스로 나뉩니다.
+작업 결과는 로컬에 먼저 쌓고, 백그라운드 전달기가 Discord Webhook으로 보냅니다. 알림이 실패해도 원래 작업·테스트·Git 결과는 바꾸지 않습니다.
 
-- `ai-task-complete`: 작업 종료 이벤트를 `%LOCALAPPDATA%\AIWorkerNotifier\inbox`에 원자적으로 기록
-- `AIWorkerNotifier`: inbox를 감시하고 Discord Webhook으로 전송
+| 구성 | 역할 |
+|------|------|
+| `ai-task-complete` | 작업 종료 이벤트를 로컬 inbox에 기록 |
+| 알림 전달 (`AIWorkerNotifier`) | inbox를 감시해 Discord로 전송 |
+| 설정 메뉴 (`AIWorkerNotifier-Setup.bat`) | Webhook·멘션·ON/OFF·테스트를 한곳에서 관리 |
 
-알림 실패는 제품 작업, 테스트, Git 결과를 바꾸지 않습니다. CLI는 이벤트 기록 실패가 발생해도 경고만 출력하고 종료 코드 0을 유지합니다.
+요구 환경: **Windows**, **PowerShell 5.1+**
 
-## 설치 위치
+---
 
-압축을 다음 위치에 풉니다.
+## 1분 시작
 
-```text
-C:\dev\SW\AIWorkerNotifier
-```
+1. 이 저장소를 원하는 폴더에 둡니다. (예: `C:\dev\SW\AIWorkerNotifier`)
+2. `AIWorkerNotifier-Setup.bat`를 실행합니다.
+3. **Webhook 설정** → Discord Webhook URL 입력  
+4. (선택) **역할 멘션 설정** → 역할 ID 저장  
+5. **알림 전달 ON/OFF** → `ON` (초록)
+6. **알림 테스트**로 Discord에 실제로 오는지 확인
 
-## 빠른 시작
-
-### 가장 쉬운 설정 메뉴
-
-탐색기에서 다음 파일을 더블클릭합니다.
-
-```text
-AIWorkerNotifier-Setup.bat
-```
-
-`AIWorkerNotifier-Setup.bat`는 UTF-8(`chcp 65001`) launcher이며, 실제 한글 메뉴는 `scripts\manage-setup.ps1`이 그립니다.
+메뉴 구성:
 
 ```text
-알림 전달   ON/OFF
-Webhook     연결됨/없음
-역할 멘션   설정됨/없음
+알림 전달   ON / OFF
+Webhook     연결됨 / 없음
+역할 멘션   설정됨 / 없음
 
 1. 알림 전달 ON/OFF
 2. Webhook 설정
 3. 역할 멘션 설정
-4. 알림 테스트
-   - 멘션 없음 / @역할 / @사용자 / @everyone
+4. 알림 테스트   (@역할 / @사용자 / @everyone)
 5. 명령 등록
 0. 나가기
 ```
 
-**알림 전달**을 ON 하면 백그라운드에서 작업 결과를 Discord로 보냅니다. 새 창을 띄우지 않습니다.
+명령 등록을 하면 새 터미널에서 `ai-task-complete`를 바로 쓸 수 있습니다. PATH 변경은 **새로 연** 터미널부터 적용됩니다.
 
-PATH 제거는 프로그램 파일이나 `%LOCALAPPDATA%\AIWorkerNotifier` 실행 데이터를 삭제하지 않습니다. PATH를 변경한 뒤에는 새 PowerShell 또는 새 Cursor CLI 세션을 열어야 합니다.
+---
 
-### PowerShell에서 개별 실행
-
-PowerShell에서:
+## 사용 예
 
 ```powershell
-cd 'C:\dev\SW\AIWorkerNotifier'
-
-# 1. 사용자 PATH에 bin 추가
-.\scripts\install-user-path.ps1
-
-# 2. Discord Webhook을 현재 Windows 사용자 DPAPI로 암호화 저장
-.\scripts\set-discord-webhook.ps1
-
-# 3. 새 PowerShell/Cursor CLI를 열고 명령 확인
-Get-Command ai-task-complete
-
-# 4. Notifier 실행
-AIWorkerNotifier
-
-# 5. 다른 터미널에서 테스트 이벤트 생성
 ai-task-complete `
-  --task 'TEST-001' `
-  --status 'AUDIT_COMPLETE' `
-  --summary 'AI Worker Notifier 설치 시험' `
-  --next 'VERIFY_DISCORD_MOBILE_NOTIFICATION'
+  -Task 'TEST-001' `
+  -Status 'AUDIT_COMPLETE' `
+  -Summary '설치 시험 완료' `
+  -NextAction 'VERIFY_DISCORD'
 ```
 
-Discord 메시지를 실제 전송하지 않고 이벤트 처리만 확인하려면:
+한글 인수는 **PowerShell에서 직접** 넘기는 편이 안전합니다. CMD `%*` 경유는 환경에 따라 깨질 수 있습니다.
+
+전송 없이 로컬 처리만 확인:
 
 ```powershell
 AIWorkerNotifier -DryRun -Once -Backlog
 ```
 
-## 현재 MVP 범위
+스크립트로만 설정할 때:
 
-포함:
+```powershell
+cd 'C:\dev\SW\AIWorkerNotifier'
+.\scripts\install-user-path.ps1
+.\scripts\set-discord-webhook.ps1
+AIWorkerNotifier   # 또는 설정 메뉴에서 ON
+```
 
-- Git 프로젝트/branch/HEAD 자동 감지
-- UTF-8 한글 JSON 이벤트
-- `.tmp` 작성 후 `.json` rename
-- live-only 및 backlog 모드
-- Discord 전송, 짧은 timeout, 1회 재시도
-- 중복 completion key 억제
-- 필드 길이 제한과 기본 sanitization
-- runtime cleanup 및 크기 제한
-- DPAPI 사용자 범위 Webhook 저장
-- 한글 설정 메뉴 (`AIWorkerNotifier-Setup.bat` → `scripts\manage-setup.ps1`, UTF-8)
-- PATH 설치/제거 스크립트
+---
 
-후속 범위:
+## 동작 요약
 
-- Windows 트레이 UI
-- Windows Credential Manager 직접 연동
-- Orca 프로세스 비정상 종료 감시
-- 프로젝트별 Webhook routing
-
-## 런타임 경로
+1. `ai-task-complete`가 이벤트를 `%LOCALAPPDATA%\AIWorkerNotifier\inbox`에 `.tmp` → `.json`으로 원자적 기록합니다.
+2. 알림 전달이 `ON`이면 inbox를 읽어 Discord로 보냅니다.
+3. Webhook URL은 Windows **DPAPI**(현재 사용자)로 암호화해 로컬에만 둡니다. 저장소에 넣지 않습니다.
+4. 역할 멘션이 설정돼 있으면 `<@&역할ID>` + `allowed_mentions.roles`로 실제 `@역할` 알림을 울립니다.
 
 ```text
 %LOCALAPPDATA%\AIWorkerNotifier\
-├─ inbox
-├─ processing
-├─ failed
-├─ history
-├─ state
-└─ logs
+├─ inbox / processing / failed / history
+├─ state\
+│  ├─ discord-webhook.dpapi      # Webhook (암호화)
+│  └─ discord-mention-role.id    # 역할 ID (숫자만)
+└─ logs\
 ```
 
-Webhook은 기본적으로 다음 파일에 Windows 사용자 DPAPI로 암호화되어 저장됩니다.
+환경 변수 `AI_WORKER_NOTIFIER_WEBHOOK_URL`이 있으면 파일보다 우선합니다.
 
-```text
-%LOCALAPPDATA%\AIWorkerNotifier\state\discord-webhook.dpapi
-```
+---
 
-선택적 멘션 역할 ID(숫자만)는 다음 파일에 저장됩니다. Git에 포함하지 않습니다.
+## 포함 / 미포함
 
-```text
-%LOCALAPPDATA%\AIWorkerNotifier\state\discord-mention-role.id
-```
+**포함**
 
-환경 변수 `AI_WORKER_NOTIFIER_WEBHOOK_URL`이 설정되어 있으면 그 값이 우선합니다.
+- 설정 메뉴(UTF-8 한글), 알림 전달 ON/OFF(백그라운드)
+- Discord Webhook + `@역할` / `@사용자` / `@everyone` 테스트
+- Git 프로젝트·branch·HEAD 자동 감지, UTF-8 한글 이벤트
+- 중복 completion key 억제, 재시도·타임아웃, 런타임 정리
+- 알림 실패 시에도 CLI 종료 코드 0 유지
+
+**아직 없음**
+
+- 트레이 UI, Credential Manager UI, 프로젝트별 Webhook 라우팅
+- Orca 비정상 종료 감시
+
+버전: `VERSION` 파일 참고 (현재 0.1.x MVP)
+
+---
+
+## 보안
+
+- **Webhook URL·역할 ID를 Git에 커밋하지 마세요.**
+- 이 프로젝트는 `.env`에 비밀을 두지 않습니다. 자격 증명은 `%LOCALAPPDATA%`의 DPAPI 파일(또는 사용자 환경 변수)을 씁니다.
+- 공개 저장소에 올릴 때는 Webhook을 재발급하고, 히스토리에 비밀이 없는지 확인하세요.
+
+자세한 정책: [`docs/SECURITY.md`](docs/SECURITY.md)
+
+---
 
 ## 문서
 
-- `docs/AGENT_CONTRACT.md`: 에이전트 호출 계약
-- `docs/DISCORD_SETUP.md`: Discord 설정
-- `docs/OPERATIONS.md`: 운영 및 장애 처리
-- `docs/SECURITY.md`: Secret·로그 정책
-- `docs/PROJECT_INTEGRATION.md`: Epub Viewer 등 프로젝트 연결 원칙
+| 문서 | 내용 |
+|------|------|
+| [`docs/DISCORD_SETUP.md`](docs/DISCORD_SETUP.md) | Discord Webhook·멘션 설정 |
+| [`docs/AGENT_CONTRACT.md`](docs/AGENT_CONTRACT.md) | 에이전트 호출 계약 |
+| [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | 운영·장애 처리 |
+| [`docs/SECURITY.md`](docs/SECURITY.md) | Secret·로그 정책 |
+| [`docs/PROJECT_INTEGRATION.md`](docs/PROJECT_INTEGRATION.md) | 다른 프로젝트 연동 원칙 |
+
+테스트: `.\tests\Test-AIWorkerNotifier.ps1`
