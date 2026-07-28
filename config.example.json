@@ -1,0 +1,15 @@
+{
+  "mode": "live-only",
+  "pollIntervalSeconds": 2,
+  "startupGraceMinutes": 3,
+  "requestTimeoutSeconds": 8,
+  "maxSendAttempts": 2,
+  "retention": {
+    "historyCount": 20,
+    "failedCount": 20,
+    "failedHours": 24,
+    "sentIndexCount": 500,
+    "sentIndexDays": 30,
+    "runtimeMaxMb": 25
+  }
+}

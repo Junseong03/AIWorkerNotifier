@@ -1,0 +1,21 @@
+# Runtime data and credentials
+runtime/
+state/
+logs/
+inbox/
+processing/
+failed/
+history/
+
+# Local secrets
+*.dpapi
+*.secret
+*.local.json
+config.json
+
+# PowerShell temporary files
+*.tmp
+
+# Windows
+Thumbs.db
+Desktop.ini
