@@ -5,6 +5,7 @@ param(
     [string]$AiTaskCompletePath,
     [string]$ResultPath,
     [string]$ArgsPath,
+    [string]$CommandPath,
     [switch]$DryRun
 )
 
@@ -21,12 +22,26 @@ function Write-EmptyHookResponse {
     [Console]::Out.Flush()
 }
 
-function Write-NotifyResultLine {
+function Get-JsonPropertyValue {
+    param(
+        [Parameter(Mandatory = $true)]$Object,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+    if ($null -eq $Object) { return $null }
+    $prop = $Object.PSObject.Properties[$Name]
+    if ($null -eq $prop) { return $null }
+    return $prop.Value
+}
+
+function Write-NotifyResultRecord {
     param(
         [Parameter(Mandatory = $true)][string]$Result,
-        [string]$Detail = ''
+        [string]$Detail = '',
+        [switch]$WriteStderr
     )
-    [Console]::Error.WriteLine(('NOTIFY_RESULT={0}' -f $Result))
+    if ($WriteStderr) {
+        [Console]::Error.WriteLine(('NOTIFY_RESULT={0}' -f $Result))
+    }
     if (-not [string]::IsNullOrWhiteSpace($ResultPath)) {
         $dir = Split-Path -Parent $ResultPath
         if ($dir -and -not (Test-Path -LiteralPath $dir)) {
@@ -76,7 +91,7 @@ function Get-CursorHookNotifyMode {
     }
     try {
         $json = Get-Content -Raw -Encoding utf8 -LiteralPath $path | ConvertFrom-Json
-        $mode = [string]$json.cursorHookNotifyMode
+        $mode = [string](Get-JsonPropertyValue -Object $json -Name 'cursorHookNotifyMode')
         if ([string]::IsNullOrWhiteSpace($mode)) { return 'always' }
         return $mode.Trim().ToLowerInvariant()
     }
@@ -85,7 +100,7 @@ function Get-CursorHookNotifyMode {
     }
 }
 
-function Test-HookEventDuplicate {
+function Get-DedupeMarkerPath {
     param(
         [Parameter(Mandatory = $true)][string]$Root,
         [Parameter(Mandatory = $true)][string]$DispatchId
@@ -96,16 +111,29 @@ function Test-HookEventDuplicate {
     if (-not (Test-Path -LiteralPath $dir)) {
         New-Item -ItemType Directory -Force -Path $dir | Out-Null
     }
-    $marker = Join-Path $dir ($safe + '.sent')
-    if (Test-Path -LiteralPath $marker -PathType Leaf) {
-        return $true
-    }
+    return (Join-Path $dir ($safe + '.sent'))
+}
+
+function Test-HookEventDuplicate {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$DispatchId
+    )
+    $marker = Get-DedupeMarkerPath -Root $Root -DispatchId $DispatchId
+    return (Test-Path -LiteralPath $marker -PathType Leaf)
+}
+
+function Write-HookEventDuplicateMarker {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$DispatchId
+    )
+    $marker = Get-DedupeMarkerPath -Root $Root -DispatchId $DispatchId
     [IO.File]::WriteAllText(
         $marker,
         ([DateTimeOffset]::UtcNow.ToString('o') + [Environment]::NewLine),
         $utf8
     )
-    return $false
 }
 
 function Resolve-StopMapping {
@@ -149,6 +177,78 @@ function Resolve-StopMapping {
     }
 }
 
+function ConvertTo-CmdQuotedArgument {
+    param([AllowNull()][string]$Value)
+    if ($null -eq $Value) { return '""' }
+    if ($Value -notmatch '[\s"&<>|^()]') {
+        return $Value
+    }
+    return ('"' + ($Value -replace '"', '""') + '"')
+}
+
+function Invoke-CmdBatchFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$BatchPath,
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [string]$CommandLogPath
+    )
+
+    $batchFull = [IO.Path]::GetFullPath($BatchPath)
+    $quotedArgs = @(
+        foreach ($arg in $Arguments) {
+            ConvertTo-CmdQuotedArgument -Value $arg
+        }
+    )
+    # Classic cmd.exe contract:
+    #   cmd.exe /d /s /c ""C:\path\file.cmd" arg1 "arg 2""
+    # Build with real quotes. Do not use C-style \" escapes in PowerShell strings.
+    $argumentString =
+        '/d /s /c ""' + $batchFull + '" ' + ($quotedArgs -join ' ') + '"'
+
+    if (-not [string]::IsNullOrWhiteSpace($CommandLogPath)) {
+        $dir = Split-Path -Parent $CommandLogPath
+        if ($dir -and -not (Test-Path -LiteralPath $dir)) {
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        }
+        $sanitized = $argumentString
+        $sanitized = [regex]::Replace($sanitized, '[A-Za-z]:\\[^\s"]+', '<path>')
+        [IO.File]::WriteAllText(
+            $CommandLogPath,
+            ($sanitized + [Environment]::NewLine),
+            $utf8
+        )
+    }
+
+    $comSpec = $env:ComSpec
+    if ([string]::IsNullOrWhiteSpace($comSpec)) {
+        $comSpec = 'cmd.exe'
+    }
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $comSpec
+    $psi.Arguments = $argumentString
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.StandardOutputEncoding = $utf8
+    $psi.StandardErrorEncoding = $utf8
+    $psi.WorkingDirectory = (Split-Path -Parent $batchFull)
+
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+    [void]$proc.Start()
+    $stdout = $proc.StandardOutput.ReadToEnd()
+    $stderr = $proc.StandardError.ReadToEnd()
+    $proc.WaitForExit()
+    return [pscustomobject]@{
+        ExitCode = [int]$proc.ExitCode
+        StdOut = [string]$stdout
+        StdErr = [string]$stderr
+        ArgumentString = $argumentString
+    }
+}
+
 try {
     if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
         $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
@@ -168,31 +268,32 @@ try {
 
     $raw = Read-StdinUtf8
     if ([string]::IsNullOrWhiteSpace($raw)) {
-        Write-NotifyResultLine -Result 'NOTIFY_FILTERED' -Detail 'empty_stdin'
+        Write-NotifyResultRecord -Result 'NOTIFY_FILTERED' -Detail 'empty_stdin' -WriteStderr
         Write-EmptyHookResponse
         exit 0
     }
 
     $payload = $raw | ConvertFrom-Json
-    $eventName = [string]$payload.hook_event_name
+    $eventName = [string](Get-JsonPropertyValue -Object $payload -Name 'hook_event_name')
     if (-not [string]::IsNullOrWhiteSpace($eventName) -and $eventName -ne 'stop') {
-        Write-NotifyResultLine -Result 'NOTIFY_FILTERED' -Detail 'non_stop_event'
+        Write-NotifyResultRecord -Result 'NOTIFY_FILTERED' -Detail 'non_stop_event' -WriteStderr
         Write-EmptyHookResponse
         exit 0
     }
 
     $mode = Get-CursorHookNotifyMode -Root $StateRoot
     if ($mode -eq 'off') {
-        Write-NotifyResultLine -Result 'NOTIFY_FILTERED' -Detail 'mode=off'
+        Write-NotifyResultRecord -Result 'NOTIFY_FILTERED' -Detail 'mode=off' -WriteStderr
         Write-EmptyHookResponse
         exit 0
     }
 
-    $generationId = [string]$payload.generation_id
-    $conversationId = [string]$payload.conversation_id
+    $generationId = [string](Get-JsonPropertyValue -Object $payload -Name 'generation_id')
+    $conversationId = [string](Get-JsonPropertyValue -Object $payload -Name 'conversation_id')
     $loopCount = 0
-    if ($null -ne $payload.loop_count) {
-        try { $loopCount = [int]$payload.loop_count } catch { $loopCount = 0 }
+    $loopRaw = Get-JsonPropertyValue -Object $payload -Name 'loop_count'
+    if ($null -ne $loopRaw -and [string]$loopRaw -ne '') {
+        try { $loopCount = [int]$loopRaw } catch { $loopCount = 0 }
     }
 
     $dispatchId = $null
@@ -208,16 +309,15 @@ try {
     $dispatchId = Limit-NotifyText $dispatchId 120
 
     if (Test-HookEventDuplicate -Root $StateRoot -DispatchId $dispatchId) {
-        Write-NotifyResultLine -Result 'NOTIFY_SKIPPED_DUPLICATE'
+        Write-NotifyResultRecord -Result 'NOTIFY_SKIPPED_DUPLICATE' -WriteStderr
         Write-EmptyHookResponse
         exit 0
     }
 
-    $mapping = Resolve-StopMapping -StopStatus ([string]$payload.status)
-    $summary = Limit-NotifyText ('Cursor GUI agent stop ({0})' -f $(
-            if ([string]::IsNullOrWhiteSpace([string]$payload.status)) { 'unknown' }
-            else { [string]$payload.status }
-        )) 300
+    $stopStatus = [string](Get-JsonPropertyValue -Object $payload -Name 'status')
+    $mapping = Resolve-StopMapping -StopStatus $stopStatus
+    $statusLabel = if ([string]::IsNullOrWhiteSpace($stopStatus)) { 'unknown' } else { $stopStatus }
+    $summary = Limit-NotifyText ('Cursor GUI agent stop ({0})' -f $statusLabel) 300
 
     $argumentList = @(
         '-Task', 'CURSOR-GUI-STOP',
@@ -245,7 +345,8 @@ try {
     }
 
     if ($DryRun) {
-        Write-NotifyResultLine -Result 'NOTIFY_SENT' -Detail 'dry_run'
+        Write-HookEventDuplicateMarker -Root $StateRoot -DispatchId $dispatchId
+        Write-NotifyResultRecord -Result 'NOTIFY_SENT' -Detail 'dry_run'
         Write-EmptyHookResponse
         exit 0
     }
@@ -254,63 +355,15 @@ try {
         $AiTaskCompletePath = Join-Path $RepoRoot 'bin\ai-task-complete.cmd'
     }
     if (-not (Test-Path -LiteralPath $AiTaskCompletePath -PathType Leaf)) {
-        Write-NotifyResultLine -Result 'NOTIFY_COMMAND_NOT_FOUND'
+        Write-NotifyResultRecord -Result 'NOTIFY_COMMAND_NOT_FOUND' -WriteStderr
         Write-EmptyHookResponse
         exit 0
     }
 
-    # PowerShell call-operator (&) against .cmd is unreliable for exit codes and
-    # merged 2>&1 streams under Cursor's hook host. Always launch through cmd.exe.
-    function ConvertTo-CmdQuotedArgument {
-        param([AllowNull()][string]$Value)
-        if ($null -eq $Value) { return '""' }
-        if ($Value -notmatch '[\s"&<>|^()]') {
-            return $Value
-        }
-        return ('"{0}"' -f ($Value -replace '"', '""'))
-    }
-
-    function Invoke-CmdBatchFile {
-        param(
-            [Parameter(Mandatory = $true)][string]$BatchPath,
-            [Parameter(Mandatory = $true)][string[]]$Arguments
-        )
-
-        $batchFull = [IO.Path]::GetFullPath($BatchPath)
-        $quotedBatch = ConvertTo-CmdQuotedArgument -Value $batchFull
-        $quotedArgs = @(
-            foreach ($arg in $Arguments) {
-                ConvertTo-CmdQuotedArgument -Value $arg
-            }
-        )
-        # /d disables AutoRun; /s keeps the outer quote stripping contract stable.
-        $argumentString = '/d /s /c "{0} {1}"' -f $quotedBatch, ($quotedArgs -join ' ')
-
-        $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = 'cmd.exe'
-        $psi.Arguments = $argumentString
-        $psi.UseShellExecute = $false
-        $psi.CreateNoWindow = $true
-        $psi.RedirectStandardOutput = $true
-        $psi.RedirectStandardError = $true
-        $psi.StandardOutputEncoding = $utf8
-        $psi.StandardErrorEncoding = $utf8
-        $psi.WorkingDirectory = (Split-Path -Parent $batchFull)
-
-        $proc = New-Object System.Diagnostics.Process
-        $proc.StartInfo = $psi
-        [void]$proc.Start()
-        $stdout = $proc.StandardOutput.ReadToEnd()
-        $stderr = $proc.StandardError.ReadToEnd()
-        $proc.WaitForExit()
-        return [pscustomobject]@{
-            ExitCode = [int]$proc.ExitCode
-            StdOut = [string]$stdout
-            StdErr = [string]$stderr
-        }
-    }
-
-    $invoke = Invoke-CmdBatchFile -BatchPath $AiTaskCompletePath -Arguments $argumentList
+    $invoke = Invoke-CmdBatchFile `
+        -BatchPath $AiTaskCompletePath `
+        -Arguments $argumentList `
+        -CommandLogPath $CommandPath
     $exitCode = [int]$invoke.ExitCode
     $outputText = [string]$invoke.StdOut
     $stderrText = [string]$invoke.StdErr
@@ -323,27 +376,37 @@ try {
 
     if ($exitCode -ne 0) {
         if ($hasArgumentError) {
-            Write-NotifyResultLine -Result 'NOTIFY_ARGUMENT_ERROR' -Detail ("exit=$exitCode")
+            Write-NotifyResultRecord -Result 'NOTIFY_ARGUMENT_ERROR' `
+                -Detail ("exit=$exitCode") -WriteStderr
         }
         else {
-            Write-NotifyResultLine -Result 'NOTIFY_CALLED_BUT_FAILED' -Detail ("exit=$exitCode")
+            Write-NotifyResultRecord -Result 'NOTIFY_CALLED_BUT_FAILED' `
+                -Detail ("exit=$exitCode") -WriteStderr
         }
         Write-EmptyHookResponse
         exit 0
     }
     if ($hasQueueSuccess) {
-        Write-NotifyResultLine -Result 'NOTIFY_SENT'
+        Write-HookEventDuplicateMarker -Root $StateRoot -DispatchId $dispatchId
+        Write-NotifyResultRecord -Result 'NOTIFY_SENT'
         Write-EmptyHookResponse
         exit 0
     }
 
-    Write-NotifyResultLine -Result 'NOTIFY_CALLED_BUT_FAILED' -Detail 'no_queue_success'
+    Write-NotifyResultRecord -Result 'NOTIFY_CALLED_BUT_FAILED' `
+        -Detail 'no_queue_success' -WriteStderr
     Write-EmptyHookResponse
     exit 0
 }
 catch {
     try {
-        Write-NotifyResultLine -Result 'NOTIFY_CALLED_BUT_FAILED' -Detail 'exception'
+        $exDetail = 'exception:' + $_.Exception.Message
+        if ($exDetail.Length -gt 180) {
+            $exDetail = $exDetail.Substring(0, 180)
+        }
+        $exDetail = [regex]::Replace($exDetail, '[A-Za-z]:\\[^\s;]+', '<path>')
+        Write-NotifyResultRecord -Result 'NOTIFY_CALLED_BUT_FAILED' `
+            -Detail $exDetail -WriteStderr
     }
     catch { }
     try {

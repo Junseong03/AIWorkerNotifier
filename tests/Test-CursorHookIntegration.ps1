@@ -39,6 +39,7 @@ function Invoke-HookAdapter {
         [Parameter(Mandatory = $true)][string]$StateRoot,
         [string]$ResultPath,
         [string]$ArgsPath,
+        [string]$CommandPath,
         [string]$AiTaskCompletePath,
         [switch]$DryRun
     )
@@ -66,6 +67,10 @@ function Invoke-HookAdapter {
         [void]$argParts.Add('-ArgsPath')
         [void]$argParts.Add(('"{0}"' -f $ArgsPath))
     }
+    if (-not [string]::IsNullOrWhiteSpace($CommandPath)) {
+        [void]$argParts.Add('-CommandPath')
+        [void]$argParts.Add(('"{0}"' -f $CommandPath))
+    }
     if (-not [string]::IsNullOrWhiteSpace($AiTaskCompletePath)) {
         [void]$argParts.Add('-AiTaskCompletePath')
         [void]$argParts.Add(('"{0}"' -f $AiTaskCompletePath))
@@ -91,6 +96,21 @@ function Invoke-HookAdapter {
         StdOut = [string]$stdout
         StdErr = [string]$stderr
     }
+}
+
+function Invoke-CursorHookCmd {
+    param(
+        [Parameter(Mandatory = $true)][string]$Json,
+        [Parameter(Mandatory = $true)][string]$WorkDir,
+        [Parameter(Mandatory = $true)][string]$OutPath,
+        [Parameter(Mandatory = $true)][string]$ErrPath
+    )
+    $tmpIn = Join-Path $WorkDir ('entrypoint-stdin-{0}.json' -f [Guid]::NewGuid().ToString('N'))
+    [IO.File]::WriteAllText($tmpIn, $Json, $utf8)
+    $hookCmd = Join-Path $root 'bin\AIWorkerNotifier-CursorHook.cmd'
+    $cmdLine = 'type "{0}" | "{1}" > "{2}" 2> "{3}"' -f $tmpIn, $hookCmd, $OutPath, $ErrPath
+    cmd.exe /c $cmdLine | Out-Null
+    return [int]$LASTEXITCODE
 }
 
 # Parser
@@ -184,15 +204,22 @@ $modeOff = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path 
 Assert-True (([string]$modeOff).Trim() -eq 'off') 'mode off'
 
 function New-StopJson {
-    param([string]$Status, [string]$GenerationId)
-    return (@{
+    param(
+        [string]$Status,
+        [string]$GenerationId,
+        [switch]$OmitLoopCount
+    )
+    $obj = [ordered]@{
         conversation_id = 'conv-test'
         generation_id = $GenerationId
         hook_event_name = 'stop'
         cursor_version = '3.13.25'
         status = $Status
-        loop_count = 0
-    } | ConvertTo-Json -Compress)
+    }
+    if (-not $OmitLoopCount) {
+        $obj['loop_count'] = 0
+    }
+    return ($obj | ConvertTo-Json -Compress)
 }
 
 # Mapping matrix via DryRun + ArgsPath
@@ -280,44 +307,132 @@ exit /b 0
 [IO.File]::WriteAllText($fakeCmd, $fakeCmdBody, $utf8)
 $fakeGen = 'gen-fakecmd-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
 $fakeResult = Join-Path $stateRoot 'fake-cmd-result.json'
+$fakeCmdLog = Join-Path $stateRoot 'fake-cmd-line.txt'
 $fakeRun = Invoke-HookAdapter -Json (New-StopJson -Status 'completed' -GenerationId $fakeGen) `
-    -StateRoot $stateRoot -ResultPath $fakeResult -AiTaskCompletePath $fakeCmd
+    -StateRoot $stateRoot -ResultPath $fakeResult -CommandPath $fakeCmdLog `
+    -AiTaskCompletePath $fakeCmd
 $fakeJson = Get-Content -Raw -Encoding utf8 -LiteralPath $fakeResult | ConvertFrom-Json
 Assert-True ($fakeRun.ExitCode -eq 0) 'fake cmd exit 0'
 Assert-True ($fakeJson.result -eq 'NOTIFY_SENT') 'fake cmd NOTIFY_SENT'
 Assert-True ($fakeRun.StdOut.Trim() -eq '{}') 'fake cmd stdout {}'
+Assert-True ([string]::IsNullOrWhiteSpace($fakeRun.StdErr.Trim())) 'fake cmd success stderr empty'
 Assert-True (Test-Path -LiteralPath $fakeLog -PathType Leaf) 'fake cmd received args'
 $fakeArgText = Get-Content -Raw -Encoding utf8 -LiteralPath $fakeLog
 Assert-True ($fakeArgText -match '-Source cursor-gui') 'fake cmd Source arg'
 Assert-True ($fakeArgText -match '-Status COMPLETE') 'fake cmd Status arg'
+$cmdLineText = Get-Content -Raw -Encoding utf8 -LiteralPath $fakeCmdLog
+Assert-True ($cmdLineText -match '/d /s /c ""') 'cmd line uses classic double-quote form'
+Assert-True ($cmdLineText -notmatch '\\"') 'cmd line has no C-style backslash quotes'
+
+# Failure then retry same DispatchId (no permanent marker on failure)
+$failBin = Join-Path $stateRoot 'fail-bin'
+New-Item -ItemType Directory -Force -Path $failBin | Out-Null
+$failCmd = Join-Path $failBin 'ai-task-complete.cmd'
+[IO.File]::WriteAllText(
+    $failCmd,
+    "@echo off`r`necho boom`r`nexit /b 2`r`n",
+    $utf8
+)
+$retryGen = 'gen-retry-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
+$failResult = Join-Path $stateRoot 'fail-result.json'
+$failRun = Invoke-HookAdapter -Json (New-StopJson -Status 'completed' -GenerationId $retryGen) `
+    -StateRoot $stateRoot -ResultPath $failResult -AiTaskCompletePath $failCmd
+$failJson = Get-Content -Raw -Encoding utf8 -LiteralPath $failResult | ConvertFrom-Json
+Assert-True ($failRun.ExitCode -eq 0) 'failure keeps hook exit 0'
+Assert-True ($failRun.StdOut.Trim() -eq '{}') 'failure stdout {}'
+Assert-True ($failJson.result -eq 'NOTIFY_CALLED_BUT_FAILED') 'failure classified'
+Assert-True ($failRun.StdErr -match 'NOTIFY_RESULT=NOTIFY_CALLED_BUT_FAILED') `
+    'failure writes stderr warning'
+# Replace failing cmd with success and retry same generation id
+[IO.File]::WriteAllText(
+    $failCmd,
+    "@echo off`r`necho notification event queued: bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb`r`nexit /b 0`r`n",
+    $utf8
+)
+$retryResult = Join-Path $stateRoot 'retry-result.json'
+$retryRun = Invoke-HookAdapter -Json (New-StopJson -Status 'completed' -GenerationId $retryGen) `
+    -StateRoot $stateRoot -ResultPath $retryResult -AiTaskCompletePath $failCmd
+$retryJson = Get-Content -Raw -Encoding utf8 -LiteralPath $retryResult | ConvertFrom-Json
+Assert-True ($retryJson.result -eq 'NOTIFY_SENT') 'retry after failure succeeds'
+Assert-True ([string]::IsNullOrWhiteSpace($retryRun.StdErr.Trim())) 'retry success stderr empty'
 
 # Live ai-task-complete.cmd through hook adapter (completed payload)
 $liveGen = 'gen-live-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
 $liveResult = Join-Path $stateRoot 'live-result.json'
 $historyDir = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) `
     'AIWorkerNotifier\history'
+if (-not (Test-Path -LiteralPath $historyDir)) {
+    New-Item -ItemType Directory -Force -Path $historyDir | Out-Null
+}
 $beforeHistory = @(
     Get-ChildItem -LiteralPath $historyDir -Filter '*-sent.json' -File -ErrorAction SilentlyContinue
 )
-$liveRun = Invoke-HookAdapter -Json (New-StopJson -Status 'completed' -GenerationId $liveGen) `
+$liveRun = Invoke-HookAdapter `
+    -Json (New-StopJson -Status 'completed' -GenerationId $liveGen -OmitLoopCount) `
     -StateRoot $stateRoot -ResultPath $liveResult `
     -AiTaskCompletePath (Join-Path $root 'bin\ai-task-complete.cmd')
 $liveJson = Get-Content -Raw -Encoding utf8 -LiteralPath $liveResult | ConvertFrom-Json
 Assert-True ($liveRun.ExitCode -eq 0) 'live cmd exit 0'
 Assert-True ($liveRun.StdOut.Trim() -eq '{}') 'live cmd stdout {}'
 Assert-True ($liveJson.result -eq 'NOTIFY_SENT') 'live cmd NOTIFY_SENT'
-Start-Sleep -Milliseconds 800
-$afterHistory = @(
+Assert-True ([string]::IsNullOrWhiteSpace($liveRun.StdErr.Trim())) 'live success stderr empty'
+$deadline = [DateTime]::UtcNow.AddSeconds(8)
+$newSent = @()
+do {
+    Start-Sleep -Milliseconds 250
+    $afterHistory = @(
+        Get-ChildItem -LiteralPath $historyDir -Filter '*-sent.json' -File -ErrorAction SilentlyContinue
+    )
+    $beforeNames = @($beforeHistory | ForEach-Object { $_.Name })
+    $newSent = @(
+        $afterHistory | Where-Object { $beforeNames -notcontains $_.Name }
+    )
+} while ($newSent.Count -lt 1 -and [DateTime]::UtcNow -lt $deadline)
+Assert-True ($newSent.Count -ge 1) 'live history created new sent json'
+
+# Actual bin\AIWorkerNotifier-CursorHook.cmd entrypoint (no loop_count)
+$entryGen = 'gen-entry-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
+$entryOut = Join-Path $stateRoot 'entry-out.txt'
+$entryErr = Join-Path $stateRoot 'entry-err.txt'
+$beforeEntryHistory = @(
     Get-ChildItem -LiteralPath $historyDir -Filter '*-sent.json' -File -ErrorAction SilentlyContinue
 )
-$newSent = @(
-    $afterHistory | Where-Object {
-        $beforeNames = @($beforeHistory | ForEach-Object { $_.Name })
-        $beforeNames -notcontains $_.Name
-    }
-)
-Assert-True ($newSent.Count -ge 1 -or $liveJson.result -eq 'NOTIFY_SENT') `
-    'live history sent json or queue success'
+$entryExit = Invoke-CursorHookCmd `
+    -Json (New-StopJson -Status 'completed' -GenerationId $entryGen -OmitLoopCount) `
+    -WorkDir $stateRoot -OutPath $entryOut -ErrPath $entryErr
+$entryStdout = [string](Get-Content -Raw -Encoding utf8 -LiteralPath $entryOut)
+$entryStderr = ''
+if (Test-Path -LiteralPath $entryErr) {
+    $entryStderr = [string](Get-Content -Raw -Encoding utf8 -LiteralPath $entryErr)
+}
+Assert-True ($entryExit -eq 0) 'entrypoint exit 0'
+Assert-True ($entryStdout.Trim() -eq '{}') 'entrypoint stdout {}'
+Assert-True ([string]::IsNullOrWhiteSpace($entryStderr)) 'entrypoint success stderr empty'
+$entryDeadline = [DateTime]::UtcNow.AddSeconds(8)
+$entryNewSent = @()
+do {
+    Start-Sleep -Milliseconds 250
+    $afterEntryHistory = @(
+        Get-ChildItem -LiteralPath $historyDir -Filter '*-sent.json' -File -ErrorAction SilentlyContinue
+    )
+    $beforeEntryNames = @($beforeEntryHistory | ForEach-Object { $_.Name })
+    $entryNewSent = @(
+        $afterEntryHistory | Where-Object { $beforeEntryNames -notcontains $_.Name }
+    )
+} while ($entryNewSent.Count -lt 1 -and [DateTime]::UtcNow -lt $entryDeadline)
+Assert-True ($entryNewSent.Count -ge 1) 'entrypoint created new sent json'
+# duplicate via entrypoint
+$entryOut2 = Join-Path $stateRoot 'entry-out2.txt'
+$entryErr2 = Join-Path $stateRoot 'entry-err2.txt'
+$entryExit2 = Invoke-CursorHookCmd `
+    -Json (New-StopJson -Status 'completed' -GenerationId $entryGen -OmitLoopCount) `
+    -WorkDir $stateRoot -OutPath $entryOut2 -ErrPath $entryErr2
+$entryStderr2 = Get-Content -Raw -Encoding utf8 -LiteralPath $entryErr2
+Assert-True ($entryExit2 -eq 0) 'entrypoint duplicate exit 0'
+Assert-True ((Get-Content -Raw -Encoding utf8 -LiteralPath $entryOut2).Trim() -eq '{}') `
+    'entrypoint duplicate stdout {}'
+Assert-True ($entryStderr2 -match 'NOTIFY_RESULT=NOTIFY_SKIPPED_DUPLICATE') `
+    'entrypoint duplicate skipped'
 
 # Uninstall preserves foreign hooks
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'scripts\uninstall-cursor-hook.ps1') `
