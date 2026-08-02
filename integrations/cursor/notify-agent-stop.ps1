@@ -259,33 +259,71 @@ try {
         exit 0
     }
 
-    $previous = $ErrorActionPreference
-    try {
-        $ErrorActionPreference = 'Continue'
-        $outputObjects = @(& $AiTaskCompletePath @argumentList 2>&1)
-        $exitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
-    }
-    finally {
-        $ErrorActionPreference = $previous
+    # PowerShell call-operator (&) against .cmd is unreliable for exit codes and
+    # merged 2>&1 streams under Cursor's hook host. Always launch through cmd.exe.
+    function ConvertTo-CmdQuotedArgument {
+        param([AllowNull()][string]$Value)
+        if ($null -eq $Value) { return '""' }
+        if ($Value -notmatch '[\s"&<>|^()]') {
+            return $Value
+        }
+        return ('"{0}"' -f ($Value -replace '"', '""'))
     }
 
-    $outputText = @(
-        $outputObjects | ForEach-Object { [string]$_ }
-    ) -join [Environment]::NewLine
-    $stderrText = @(
-        $outputObjects |
-            Where-Object { $_ -is [Management.Automation.ErrorRecord] } |
-            ForEach-Object { [string]$_ }
-    ) -join [Environment]::NewLine
+    function Invoke-CmdBatchFile {
+        param(
+            [Parameter(Mandatory = $true)][string]$BatchPath,
+            [Parameter(Mandatory = $true)][string[]]$Arguments
+        )
+
+        $batchFull = [IO.Path]::GetFullPath($BatchPath)
+        $quotedBatch = ConvertTo-CmdQuotedArgument -Value $batchFull
+        $quotedArgs = @(
+            foreach ($arg in $Arguments) {
+                ConvertTo-CmdQuotedArgument -Value $arg
+            }
+        )
+        # /d disables AutoRun; /s keeps the outer quote stripping contract stable.
+        $argumentString = '/d /s /c "{0} {1}"' -f $quotedBatch, ($quotedArgs -join ' ')
+
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = 'cmd.exe'
+        $psi.Arguments = $argumentString
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.StandardOutputEncoding = $utf8
+        $psi.StandardErrorEncoding = $utf8
+        $psi.WorkingDirectory = (Split-Path -Parent $batchFull)
+
+        $proc = New-Object System.Diagnostics.Process
+        $proc.StartInfo = $psi
+        [void]$proc.Start()
+        $stdout = $proc.StandardOutput.ReadToEnd()
+        $stderr = $proc.StandardError.ReadToEnd()
+        $proc.WaitForExit()
+        return [pscustomobject]@{
+            ExitCode = [int]$proc.ExitCode
+            StdOut = [string]$stdout
+            StdErr = [string]$stderr
+        }
+    }
+
+    $invoke = Invoke-CmdBatchFile -BatchPath $AiTaskCompletePath -Arguments $argumentList
+    $exitCode = [int]$invoke.ExitCode
+    $outputText = [string]$invoke.StdOut
+    $stderrText = [string]$invoke.StdErr
+    $combinedText = ($outputText + [Environment]::NewLine + $stderrText)
     $normalizedStderr = $stderrText -replace '\s+', ''
     $hasArgumentError = $normalizedStderr -match
         '(?i)MissingMandatoryParameter|ParameterBindingException'
-    $hasQueueSuccess = $outputText -match
+    $hasQueueSuccess = $combinedText -match
         '(?i)notification\s+event\s+queued\s*:\s*[0-9a-f-]{8,}|queue\s+success'
 
     if ($exitCode -ne 0) {
         if ($hasArgumentError) {
-            Write-NotifyResultLine -Result 'NOTIFY_ARGUMENT_ERROR'
+            Write-NotifyResultLine -Result 'NOTIFY_ARGUMENT_ERROR' -Detail ("exit=$exitCode")
         }
         else {
             Write-NotifyResultLine -Result 'NOTIFY_CALLED_BUT_FAILED' -Detail ("exit=$exitCode")

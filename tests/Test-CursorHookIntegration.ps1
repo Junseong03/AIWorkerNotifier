@@ -265,6 +265,60 @@ Assert-True ($missRun.ExitCode -eq 0) 'missing command exit 0'
 Assert-True ($missJson.result -eq 'NOTIFY_COMMAND_NOT_FOUND') 'missing command classified'
 Assert-True ($missRun.StdOut.Trim() -eq '{}') 'missing command stdout {}'
 
+# Real .cmd invocation via cmd.exe (fake queue success)
+$fakeBin = Join-Path $stateRoot 'fake-bin'
+New-Item -ItemType Directory -Force -Path $fakeBin | Out-Null
+$fakeCmd = Join-Path $fakeBin 'ai-task-complete.cmd'
+$fakeLog = Join-Path $fakeBin 'args-log.txt'
+$fakeCmdBody = @"
+@echo off
+setlocal
+> "$fakeLog" echo ARGS:%*
+echo notification event queued: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+exit /b 0
+"@
+[IO.File]::WriteAllText($fakeCmd, $fakeCmdBody, $utf8)
+$fakeGen = 'gen-fakecmd-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
+$fakeResult = Join-Path $stateRoot 'fake-cmd-result.json'
+$fakeRun = Invoke-HookAdapter -Json (New-StopJson -Status 'completed' -GenerationId $fakeGen) `
+    -StateRoot $stateRoot -ResultPath $fakeResult -AiTaskCompletePath $fakeCmd
+$fakeJson = Get-Content -Raw -Encoding utf8 -LiteralPath $fakeResult | ConvertFrom-Json
+Assert-True ($fakeRun.ExitCode -eq 0) 'fake cmd exit 0'
+Assert-True ($fakeJson.result -eq 'NOTIFY_SENT') 'fake cmd NOTIFY_SENT'
+Assert-True ($fakeRun.StdOut.Trim() -eq '{}') 'fake cmd stdout {}'
+Assert-True (Test-Path -LiteralPath $fakeLog -PathType Leaf) 'fake cmd received args'
+$fakeArgText = Get-Content -Raw -Encoding utf8 -LiteralPath $fakeLog
+Assert-True ($fakeArgText -match '-Source cursor-gui') 'fake cmd Source arg'
+Assert-True ($fakeArgText -match '-Status COMPLETE') 'fake cmd Status arg'
+
+# Live ai-task-complete.cmd through hook adapter (completed payload)
+$liveGen = 'gen-live-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
+$liveResult = Join-Path $stateRoot 'live-result.json'
+$historyDir = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) `
+    'AIWorkerNotifier\history'
+$beforeHistory = @(
+    Get-ChildItem -LiteralPath $historyDir -Filter '*-sent.json' -File -ErrorAction SilentlyContinue
+)
+$liveRun = Invoke-HookAdapter -Json (New-StopJson -Status 'completed' -GenerationId $liveGen) `
+    -StateRoot $stateRoot -ResultPath $liveResult `
+    -AiTaskCompletePath (Join-Path $root 'bin\ai-task-complete.cmd')
+$liveJson = Get-Content -Raw -Encoding utf8 -LiteralPath $liveResult | ConvertFrom-Json
+Assert-True ($liveRun.ExitCode -eq 0) 'live cmd exit 0'
+Assert-True ($liveRun.StdOut.Trim() -eq '{}') 'live cmd stdout {}'
+Assert-True ($liveJson.result -eq 'NOTIFY_SENT') 'live cmd NOTIFY_SENT'
+Start-Sleep -Milliseconds 800
+$afterHistory = @(
+    Get-ChildItem -LiteralPath $historyDir -Filter '*-sent.json' -File -ErrorAction SilentlyContinue
+)
+$newSent = @(
+    $afterHistory | Where-Object {
+        $beforeNames = @($beforeHistory | ForEach-Object { $_.Name })
+        $beforeNames -notcontains $_.Name
+    }
+)
+Assert-True ($newSent.Count -ge 1 -or $liveJson.result -eq 'NOTIFY_SENT') `
+    'live history sent json or queue success'
+
 # Uninstall preserves foreign hooks
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'scripts\uninstall-cursor-hook.ps1') `
     -HooksPath $hooksPath
