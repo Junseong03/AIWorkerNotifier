@@ -22,7 +22,11 @@ foreach ($file in @(
     $payloadHelper,
     $cliInternal,
     $notifierInternal,
-    (Join-Path $root 'scripts\manage-setup.ps1')
+    (Join-Path $root 'scripts\manage-setup.ps1'),
+    (Join-Path $root 'scripts\install-cursor-hook.ps1'),
+    (Join-Path $root 'scripts\uninstall-cursor-hook.ps1'),
+    (Join-Path $root 'scripts\set-cursor-hook-mode.ps1'),
+    (Join-Path $root 'integrations\cursor\notify-agent-stop.ps1')
 )) {
     $tokens = $null
     $errors = $null

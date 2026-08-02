@@ -6,15 +6,18 @@
 
 ```powershell
 ai-task-complete `
-  --task 'READER-P1-A' `
-  --status 'COMMITTED_DEVICE_VERIFIED' `
-  --summary 'Windows anchor restore 검증과 후속 커밋 완료' `
-  --next 'AUDIT_GIT_STATE_TASK_INDEX' `
-  --tests 'pagination 44, escape 8, android 10 passed' `
-  --agent-role 'LOCAL_COORDINATOR' `
-  --scope 'local_phase'
+  -Task 'READER-P1-A' `
+  -Status 'COMMITTED_DEVICE_VERIFIED' `
+  -Summary 'Windows anchor restore 검증과 후속 커밋 완료' `
+  -NextAction 'AUDIT_GIT_STATE_TASK_INDEX' `
+  -Tests 'pagination 44, escape 8, android 10 passed' `
+  -AgentRole 'LOCAL_COORDINATOR' `
+  -Source 'cursor-cli' `
+  -Scope 'local_phase'
 ```
 
+Cursor GUI의 자동 완료 알림은 사용자 전역 `stop` Hook이 소유합니다.
+자세한 설치·모드는 [`CURSOR_INTEGRATION.md`](CURSOR_INTEGRATION.md)를 봅니다.
 ## 필수 규칙
 
 - 알림 호출 후 현재 dispatch의 코드·테스트·문서·Git 결과를 다시 변경하지 않습니다.

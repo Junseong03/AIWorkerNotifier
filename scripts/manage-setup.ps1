@@ -790,11 +790,115 @@ function Show-NotificationTestMenu {
     }
 }
 
+function Get-CursorHookStatusLabel {
+    $statusScript = Join-Path $ScriptDirectory 'install-cursor-hook.ps1'
+    if (-not (Test-Path -LiteralPath $statusScript -PathType Leaf)) {
+        return '스크립트 없음'
+    }
+    try {
+        $raw = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $statusScript -StatusOnly
+        $obj = $raw | ConvertFrom-Json
+        switch ([string]$obj.status) {
+            'installed' { return '설치됨' }
+            'absent' { return '미설치' }
+            'missing' { return '미설치' }
+            'error' { return '오류' }
+            default { return ([string]$obj.status) }
+        }
+    }
+    catch {
+        return '오류'
+    }
+}
+
+function Get-CursorHookModeLabel {
+    $modeScript = Join-Path $ScriptDirectory 'set-cursor-hook-mode.ps1'
+    if (-not (Test-Path -LiteralPath $modeScript -PathType Leaf)) {
+        return 'unknown'
+    }
+    try {
+        $mode = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $modeScript -Get)
+        if ([string]::IsNullOrWhiteSpace([string]$mode)) { return 'always' }
+        return ([string]$mode).Trim()
+    }
+    catch {
+        return 'unknown'
+    }
+}
+
+function Show-CursorHookMenu {
+    $installScript = Join-Path $ScriptDirectory 'install-cursor-hook.ps1'
+    $uninstallScript = Join-Path $ScriptDirectory 'uninstall-cursor-hook.ps1'
+    $modeScript = Join-Path $ScriptDirectory 'set-cursor-hook-mode.ps1'
+
+    while ($true) {
+        Clear-Host
+        Write-Host '============================================================'
+        Write-Host '                   Cursor Hook'
+        Write-Host '============================================================'
+        Write-Host
+        Write-Host ("상태: {0}" -f (Get-CursorHookStatusLabel))
+        Write-Host ("모드: {0}" -f (Get-CursorHookModeLabel))
+        Write-Host
+        Write-Host '  1. 설치 / 재설치'
+        Write-Host '  2. 제거'
+        Write-Host '  3. 모드 always'
+        Write-Host '  4. 모드 off'
+        Write-Host '  5. 상태 확인'
+        Write-Host '  0. 뒤로'
+        Write-Host
+
+        $selection = Read-Host '번호를 고르세요'
+        try {
+            switch ($selection) {
+                '1' {
+                    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installScript
+                    Write-Host
+                    Write-Host '설치 후 Cursor를 재시작하거나 hooks.json 리로드가 필요할 수 있습니다.'
+                    Pause-Setup
+                }
+                '2' {
+                    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $uninstallScript
+                    Pause-Setup
+                }
+                '3' {
+                    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $modeScript -Mode always
+                    Pause-Setup
+                }
+                '4' {
+                    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $modeScript -Mode off
+                    Pause-Setup
+                }
+                '5' {
+                    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installScript -StatusOnly
+                    Write-Host
+                    Write-Host ("모드: {0}" -f (Get-CursorHookModeLabel))
+                    Pause-Setup
+                }
+                '0' { return }
+                default {
+                    Write-Host
+                    Write-Host '[ERROR] 0~5 사이 숫자를 입력하세요.'
+                    Pause-Setup
+                }
+            }
+        }
+        catch {
+            Write-Host
+            Write-Host '[ERROR] Cursor Hook 작업에 실패했습니다.'
+            Write-Host "        $($_.Exception.Message)"
+            Pause-Setup
+        }
+    }
+}
+
 function Show-Menu {
     $pathStatus = if (Test-BinPathRegistered) { '등록됨' } else { '미등록' }
     $deliveryStatus = Get-NotificationDeliveryStatus
     $webhookStatus = Get-WebhookStatus
     $mentionStatus = Get-MentionRoleStatus
+    $cursorHookStatus = Get-CursorHookStatusLabel
+    $cursorHookMode = Get-CursorHookModeLabel
 
     Clear-Host
     Write-Host '============================================================'
@@ -811,12 +915,15 @@ function Show-Menu {
     Write-Host ("  Webhook     {0}" -f $webhookStatus)
     Write-Host ("  역할 멘션   {0}" -f $mentionStatus)
     Write-Host ("  명령 등록   {0}" -f $pathStatus)
+    Write-Host ("  Cursor Hook {0}" -f $cursorHookStatus)
+    Write-Host ("  Hook 모드   {0}" -f $cursorHookMode)
     Write-Host
     Write-Host '  1. 알림 전달 ON/OFF'
     Write-Host '  2. Webhook 설정'
     Write-Host '  3. 역할 멘션 설정'
     Write-Host '  4. 알림 테스트'
     Write-Host '  5. 명령 등록'
+    Write-Host '  6. Cursor Hook'
     Write-Host '  0. 나가기'
     Write-Host
 }
@@ -832,10 +939,11 @@ while ($true) {
             '3' { Show-MentionRoleMenu }
             '4' { Show-NotificationTestMenu }
             '5' { Show-PathMenu }
+            '6' { Show-CursorHookMenu }
             '0' { Write-Host; Write-Host '종료합니다.'; exit 0 }
             default {
                 Write-Host
-                Write-Host '[ERROR] 0~5 사이 숫자를 입력하세요.'
+                Write-Host '[ERROR] 0~6 사이 숫자를 입력하세요.'
                 Pause-Setup
             }
         }

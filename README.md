@@ -8,7 +8,8 @@ Windows에서 AI/자동화 작업이 끝나면 Discord로 알려 주는 작은 P
 |------|------|
 | `ai-task-complete` | 작업 종료 이벤트를 로컬 inbox에 기록 |
 | 알림 전달 (`AIWorkerNotifier`) | inbox를 감시해 Discord로 전송 |
-| 설정 메뉴 (`AIWorkerNotifier-Setup.bat`) | Webhook·멘션·ON/OFF·테스트를 한곳에서 관리 |
+| Cursor Hook | GUI Agent `stop` 시 `ai-task-complete` 자동 호출 |
+| 설정 메뉴 (`AIWorkerNotifier-Setup.bat`) | Webhook·멘션·ON/OFF·Cursor Hook·테스트를 한곳에서 관리 |
 
 요구 환경: **Windows**, **PowerShell 5.1+**
 
@@ -29,14 +30,26 @@ Windows에서 AI/자동화 작업이 끝나면 Discord로 알려 주는 작은 P
 알림 전달   ON / OFF
 Webhook     연결됨 / 없음
 역할 멘션   설정됨 / 없음
+명령 등록   등록됨 / 미등록
+Cursor Hook 설치됨 / 미설치
 
 1. 알림 전달 ON/OFF
 2. Webhook 설정
 3. 역할 멘션 설정
 4. 알림 테스트   (@역할 / @사용자 / @everyone)
 5. 명령 등록
+6. Cursor Hook
 0. 나가기
 ```
+
+Cursor GUI 완료 알림:
+
+```powershell
+.\scripts\install-cursor-hook.ps1
+.\scripts\set-cursor-hook-mode.ps1 -Mode always
+```
+
+상세: [`docs/CURSOR_INTEGRATION.md`](docs/CURSOR_INTEGRATION.md)
 
 명령 등록을 하면 새 터미널에서 `ai-task-complete`를 바로 쓸 수 있습니다. PATH 변경은 **새로 연** 터미널부터 적용됩니다.
 
@@ -83,7 +96,8 @@ AIWorkerNotifier   # 또는 설정 메뉴에서 ON
 ├─ inbox / processing / failed / history
 ├─ state\
 │  ├─ discord-webhook.dpapi      # Webhook (암호화)
-│  └─ discord-mention-role.id    # 역할 ID (숫자만)
+│  ├─ discord-mention-role.id    # 역할 ID (숫자만)
+│  └─ integration-settings.json  # Cursor Hook 모드 등
 └─ logs\
 ```
 
@@ -97,6 +111,7 @@ AIWorkerNotifier   # 또는 설정 메뉴에서 ON
 
 - 설정 메뉴(UTF-8 한글), 알림 전달 ON/OFF(백그라운드)
 - Discord Webhook + `@역할` / `@사용자` / `@everyone` 테스트
+- Cursor GUI `stop` Hook 설치·제거·always/off 모드
 - Git 프로젝트·branch·HEAD 자동 감지, UTF-8 한글 이벤트
 - 중복 completion key 억제, 재시도·타임아웃, 런타임 정리
 - 알림 실패 시에도 CLI 종료 코드 0 유지
@@ -104,6 +119,7 @@ AIWorkerNotifier   # 또는 설정 메뉴에서 ON
 **아직 없음**
 
 - 트레이 UI, Credential Manager UI, 프로젝트별 Webhook 라우팅
+- Cursor Hook `workflow_only` 모드
 - Orca 비정상 종료 감시
 
 버전: `VERSION` 파일 참고 (현재 0.1.x MVP)
@@ -125,9 +141,10 @@ AIWorkerNotifier   # 또는 설정 메뉴에서 ON
 | 문서 | 내용 |
 |------|------|
 | [`docs/DISCORD_SETUP.md`](docs/DISCORD_SETUP.md) | Discord Webhook·멘션 설정 |
+| [`docs/CURSOR_INTEGRATION.md`](docs/CURSOR_INTEGRATION.md) | Cursor GUI Hook 설치·모드 |
 | [`docs/AGENT_CONTRACT.md`](docs/AGENT_CONTRACT.md) | 에이전트 호출 계약 |
 | [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | 운영·장애 처리 |
 | [`docs/SECURITY.md`](docs/SECURITY.md) | Secret·로그 정책 |
 | [`docs/PROJECT_INTEGRATION.md`](docs/PROJECT_INTEGRATION.md) | 다른 프로젝트 연동 원칙 |
 
-테스트: `.\tests\Test-AIWorkerNotifier.ps1`
+테스트: `.\tests\Test-AIWorkerNotifier.ps1`, `.\tests\Test-CursorHookIntegration.ps1`

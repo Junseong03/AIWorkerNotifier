@@ -25,6 +25,10 @@ Epub Viewer 후보 파일:
 
 호출 소유권:
 
-- 수동 Cursor LOCAL_COORDINATOR: 반환 직전 Cursor가 호출
+- Cursor GUI Agent: 사용자 전역 `stop` Hook이 `ai-task-complete`을 호출
+  (설치·모드: [`CURSOR_INTEGRATION.md`](CURSOR_INTEGRATION.md))
+- 수동/CLI LOCAL_COORDINATOR: 필요 시 반환 직전 담당 역할이 호출할 수 있음
 - MAIN_COORDINATOR/CODEX_DIRECT: 최종 dispatch 반환 직전 담당 coordinator가 호출
 - Orca one-shot worker: wrapper가 호출하고 worker 프롬프트에서는 호출 금지
+
+Agent 본체가 GUI 완료 알림을 직접 호출하도록 프롬프트에 의존하지 않습니다.
