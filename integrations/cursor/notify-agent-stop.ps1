@@ -60,10 +60,22 @@ function Write-NotifyResultRecord {
 }
 
 function Read-StdinUtf8 {
+    # Detect BOM so UTF-8/UTF-16 temp files from Cursor are decoded correctly.
+    # Also strip a leading U+FEFF defensively if a decoder left it in the text.
     $stdin = [Console]::OpenStandardInput()
-    $reader = New-Object System.IO.StreamReader($stdin, $utf8, $false, 1024, $true)
+    $reader = New-Object System.IO.StreamReader(
+        $stdin,
+        $utf8,
+        $true,
+        1024,
+        $true
+    )
     try {
-        return $reader.ReadToEnd()
+        $text = $reader.ReadToEnd()
+        if (-not [string]::IsNullOrEmpty($text) -and [int][char]$text[0] -eq 0xFEFF) {
+            $text = $text.Substring(1)
+        }
+        return $text
     }
     finally {
         $reader.Dispose()

@@ -103,14 +103,56 @@ function Invoke-CursorHookCmd {
         [Parameter(Mandatory = $true)][string]$Json,
         [Parameter(Mandatory = $true)][string]$WorkDir,
         [Parameter(Mandatory = $true)][string]$OutPath,
-        [Parameter(Mandatory = $true)][string]$ErrPath
+        [Parameter(Mandatory = $true)][string]$ErrPath,
+        [System.Text.Encoding]$Encoding = $null,
+        [string[]]$HookArgs = @()
     )
+    if ($null -eq $Encoding) {
+        $Encoding = $utf8
+    }
     $tmpIn = Join-Path $WorkDir ('entrypoint-stdin-{0}.json' -f [Guid]::NewGuid().ToString('N'))
-    [IO.File]::WriteAllText($tmpIn, $Json, $utf8)
+    [IO.File]::WriteAllText($tmpIn, $Json, $Encoding)
+    return Invoke-CursorHookCmdFromFile `
+        -InputPath $tmpIn -OutPath $OutPath -ErrPath $ErrPath -HookArgs $HookArgs
+}
+
+function Invoke-CursorHookCmdFromFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$InputPath,
+        [Parameter(Mandatory = $true)][string]$OutPath,
+        [Parameter(Mandatory = $true)][string]$ErrPath,
+        [string[]]$HookArgs = @()
+    )
     $hookCmd = Join-Path $root 'bin\AIWorkerNotifier-CursorHook.cmd'
-    $cmdLine = 'type "{0}" | "{1}" > "{2}" 2> "{3}"' -f $tmpIn, $hookCmd, $OutPath, $ErrPath
+    $extra = ''
+    if ($HookArgs -and $HookArgs.Count -gt 0) {
+        $extra = ' ' + ($HookArgs -join ' ')
+    }
+    $cmdLine = 'type "{0}" | "{1}"{2} > "{3}" 2> "{4}"' -f `
+        $InputPath, $hookCmd, $extra, $OutPath, $ErrPath
     cmd.exe /c $cmdLine | Out-Null
     return [int]$LASTEXITCODE
+}
+
+function Wait-NewSentHistory {
+    param(
+        [Parameter(Mandatory = $true)][string]$HistoryDir,
+        [Parameter(Mandatory = $true)][object[]]$BeforeFiles,
+        [int]$TimeoutSeconds = 8
+    )
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $beforeNames = @($BeforeFiles | ForEach-Object { $_.Name })
+    do {
+        Start-Sleep -Milliseconds 250
+        $after = @(
+            Get-ChildItem -LiteralPath $HistoryDir -Filter '*-sent.json' -File -ErrorAction SilentlyContinue
+        )
+        $newSent = @(
+            $after | Where-Object { $beforeNames -notcontains $_.Name }
+        )
+        if ($newSent.Count -ge 1) { return ,$newSent }
+    } while ([DateTime]::UtcNow -lt $deadline)
+    return ,@()
 }
 
 # Parser
@@ -376,18 +418,7 @@ Assert-True ($liveRun.ExitCode -eq 0) 'live cmd exit 0'
 Assert-True ($liveRun.StdOut.Trim() -eq '{}') 'live cmd stdout {}'
 Assert-True ($liveJson.result -eq 'NOTIFY_SENT') 'live cmd NOTIFY_SENT'
 Assert-True ([string]::IsNullOrWhiteSpace($liveRun.StdErr.Trim())) 'live success stderr empty'
-$deadline = [DateTime]::UtcNow.AddSeconds(8)
-$newSent = @()
-do {
-    Start-Sleep -Milliseconds 250
-    $afterHistory = @(
-        Get-ChildItem -LiteralPath $historyDir -Filter '*-sent.json' -File -ErrorAction SilentlyContinue
-    )
-    $beforeNames = @($beforeHistory | ForEach-Object { $_.Name })
-    $newSent = @(
-        $afterHistory | Where-Object { $beforeNames -notcontains $_.Name }
-    )
-} while ($newSent.Count -lt 1 -and [DateTime]::UtcNow -lt $deadline)
+$newSent = @(Wait-NewSentHistory -HistoryDir $historyDir -BeforeFiles $beforeHistory)
 Assert-True ($newSent.Count -ge 1) 'live history created new sent json'
 
 # Actual bin\AIWorkerNotifier-CursorHook.cmd entrypoint (no loop_count)
@@ -408,18 +439,7 @@ if (Test-Path -LiteralPath $entryErr) {
 Assert-True ($entryExit -eq 0) 'entrypoint exit 0'
 Assert-True ($entryStdout.Trim() -eq '{}') 'entrypoint stdout {}'
 Assert-True ([string]::IsNullOrWhiteSpace($entryStderr)) 'entrypoint success stderr empty'
-$entryDeadline = [DateTime]::UtcNow.AddSeconds(8)
-$entryNewSent = @()
-do {
-    Start-Sleep -Milliseconds 250
-    $afterEntryHistory = @(
-        Get-ChildItem -LiteralPath $historyDir -Filter '*-sent.json' -File -ErrorAction SilentlyContinue
-    )
-    $beforeEntryNames = @($beforeEntryHistory | ForEach-Object { $_.Name })
-    $entryNewSent = @(
-        $afterEntryHistory | Where-Object { $beforeEntryNames -notcontains $_.Name }
-    )
-} while ($entryNewSent.Count -lt 1 -and [DateTime]::UtcNow -lt $entryDeadline)
+$entryNewSent = @(Wait-NewSentHistory -HistoryDir $historyDir -BeforeFiles $beforeEntryHistory)
 Assert-True ($entryNewSent.Count -ge 1) 'entrypoint created new sent json'
 # duplicate via entrypoint
 $entryOut2 = Join-Path $stateRoot 'entry-out2.txt'
@@ -433,6 +453,209 @@ Assert-True ((Get-Content -Raw -Encoding utf8 -LiteralPath $entryOut2).Trim() -e
     'entrypoint duplicate stdout {}'
 Assert-True ($entryStderr2 -match 'NOTIFY_RESULT=NOTIFY_SKIPPED_DUPLICATE') `
     'entrypoint duplicate skipped'
+
+# Entrypoint encoding matrix via fake queue (fixture isolation)
+$encBin = Join-Path $stateRoot 'enc-bin'
+New-Item -ItemType Directory -Force -Path $encBin | Out-Null
+$encFakeCmd = Join-Path $encBin 'ai-task-complete.cmd'
+$encFakeLog = Join-Path $encBin 'args-log.txt'
+$encFakeBody = @"
+@echo off
+setlocal
+>> "$encFakeLog" echo ARGS:%*
+echo notification event queued: cccccccc-cccc-cccc-cccc-cccccccccccc
+exit /b 0
+"@
+[IO.File]::WriteAllText($encFakeCmd, $encFakeBody, $utf8)
+$utf8Bom = [System.Text.UTF8Encoding]::new($true)
+$utf16Le = [System.Text.UnicodeEncoding]::new($false, $true)
+
+function New-CursorLikeStopJson {
+    param([string]$GenerationId, [switch]$OmitLoopCount)
+    $obj = [ordered]@{
+        conversation_id = 'conv-cursor-like'
+        generation_id = $GenerationId
+        model = 'composer'
+        status = 'completed'
+        hook_event_name = 'stop'
+        cursor_version = '3.13.25'
+        workspace_roots = @('C:\dev\SW\AIWorkerNotifier')
+        transcript_path = 'C:\Users\fixture\AppData\Roaming\Cursor\User\globalStorage\transcripts\fake.jsonl'
+    }
+    if (-not $OmitLoopCount) {
+        $obj['loop_count'] = 1
+    }
+    return ($obj | ConvertTo-Json -Compress)
+}
+
+function Invoke-EntrypointEncodingCase {
+    param(
+        [Parameter(Mandatory = $true)][string]$Label,
+        [Parameter(Mandatory = $true)][string]$GenerationId,
+        [Parameter(Mandatory = $true)][string]$Json,
+        [Parameter(Mandatory = $true)][System.Text.Encoding]$Encoding,
+        [switch]$ExpectEmptyStdin
+    )
+    $outPath = Join-Path $stateRoot ("enc-{0}-out.txt" -f $Label)
+    $errPath = Join-Path $stateRoot ("enc-{0}-err.txt" -f $Label)
+    $resultPath = Join-Path $stateRoot ("enc-{0}-result.json" -f $Label)
+    if (Test-Path -LiteralPath $encFakeLog) {
+        Remove-Item -LiteralPath $encFakeLog -Force
+    }
+    $hookArgs = @(
+        '-RepoRoot', ('"{0}"' -f $root),
+        '-StateRoot', ('"{0}"' -f $stateRoot),
+        '-AiTaskCompletePath', ('"{0}"' -f $encFakeCmd),
+        '-ResultPath', ('"{0}"' -f $resultPath)
+    )
+    if ($ExpectEmptyStdin) {
+        $emptyPath = Join-Path $stateRoot ("enc-{0}-empty.txt" -f $Label)
+        [IO.File]::WriteAllBytes($emptyPath, [byte[]]@())
+        $exitCode = Invoke-CursorHookCmdFromFile `
+            -InputPath $emptyPath -OutPath $outPath -ErrPath $errPath -HookArgs $hookArgs
+    }
+    else {
+        $exitCode = Invoke-CursorHookCmd `
+            -Json $Json -WorkDir $stateRoot -OutPath $outPath -ErrPath $errPath `
+            -Encoding $Encoding -HookArgs $hookArgs
+    }
+    $stdout = ''
+    $stderr = ''
+    if (Test-Path -LiteralPath $outPath) {
+        $rawOut = Get-Content -Raw -Encoding utf8 -LiteralPath $outPath -ErrorAction SilentlyContinue
+        if ($null -ne $rawOut) { $stdout = [string]$rawOut }
+    }
+    if (Test-Path -LiteralPath $errPath) {
+        $rawErr = Get-Content -Raw -Encoding utf8 -LiteralPath $errPath -ErrorAction SilentlyContinue
+        if ($null -ne $rawErr) { $stderr = [string]$rawErr }
+    }
+    return [pscustomobject]@{
+        Label = $Label
+        ExitCode = [int]$exitCode
+        StdOut = [string]$stdout
+        StdErr = [string]$stderr
+        ResultPath = $resultPath
+        FakeLog = $encFakeLog
+    }
+}
+
+$encCases = @(
+    @{
+        Label = 'utf8-nobom'
+        Gen = 'enc-utf8-nobom-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
+        Encoding = $utf8
+        JsonBuilder = { param($g) New-StopJson -Status 'completed' -GenerationId $g }
+        ExpectSent = $true
+    },
+    @{
+        Label = 'utf8-bom'
+        Gen = 'enc-utf8-bom-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
+        Encoding = $utf8Bom
+        JsonBuilder = { param($g) New-StopJson -Status 'completed' -GenerationId $g }
+        ExpectSent = $true
+    },
+    @{
+        Label = 'utf16le-bom'
+        Gen = 'enc-utf16le-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
+        Encoding = $utf16Le
+        JsonBuilder = { param($g) New-StopJson -Status 'completed' -GenerationId $g }
+        ExpectSent = $true
+    },
+    @{
+        Label = 'loop-present'
+        Gen = 'enc-loop-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
+        Encoding = $utf8Bom
+        JsonBuilder = { param($g) New-StopJson -Status 'completed' -GenerationId $g }
+        ExpectSent = $true
+    },
+    @{
+        Label = 'loop-absent'
+        Gen = 'enc-noloop-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
+        Encoding = $utf8Bom
+        JsonBuilder = { param($g) New-StopJson -Status 'completed' -GenerationId $g -OmitLoopCount }
+        ExpectSent = $true
+    },
+    @{
+        Label = 'cursor-like'
+        Gen = 'enc-cursorlike-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
+        Encoding = $utf8Bom
+        JsonBuilder = { param($g) New-CursorLikeStopJson -GenerationId $g }
+        ExpectSent = $true
+    }
+)
+
+foreach ($enc in $encCases) {
+    $json = & $enc.JsonBuilder $enc.Gen
+    $run = Invoke-EntrypointEncodingCase `
+        -Label $enc.Label -GenerationId $enc.Gen -Json $json -Encoding $enc.Encoding
+    Assert-True ($run.ExitCode -eq 0) ("enc $($enc.Label) exit 0")
+    Assert-True (([string]$run.StdOut).Trim() -eq '{}') ("enc $($enc.Label) stdout {}")
+    if ($enc.ExpectSent) {
+        Assert-True ([string]::IsNullOrWhiteSpace(([string]$run.StdErr).Trim())) `
+            ("enc $($enc.Label) success stderr empty")
+        Assert-True (Test-Path -LiteralPath $run.ResultPath -PathType Leaf) `
+            ("enc $($enc.Label) result file")
+        if (Test-Path -LiteralPath $run.ResultPath -PathType Leaf) {
+            $encJson = Get-Content -Raw -Encoding utf8 -LiteralPath $run.ResultPath | ConvertFrom-Json
+            Assert-True ($encJson.result -eq 'NOTIFY_SENT') ("enc $($enc.Label) NOTIFY_SENT")
+        }
+        Assert-True (Test-Path -LiteralPath $run.FakeLog -PathType Leaf) `
+            ("enc $($enc.Label) fake queue args")
+        if (Test-Path -LiteralPath $run.FakeLog -PathType Leaf) {
+            $encArgs = Get-Content -Raw -Encoding utf8 -LiteralPath $run.FakeLog
+            Assert-True ($encArgs -match '-Source cursor-gui') ("enc $($enc.Label) Source arg")
+            Assert-True ($encArgs -match [regex]::Escape($enc.Gen)) ("enc $($enc.Label) DispatchId arg")
+        }
+    }
+}
+
+# Empty stdin through entrypoint
+$emptyRun = Invoke-EntrypointEncodingCase `
+    -Label 'empty' -GenerationId 'enc-empty' -Json '{}' -Encoding $utf8 -ExpectEmptyStdin
+Assert-True ($emptyRun.ExitCode -eq 0) 'enc empty exit 0'
+Assert-True ($emptyRun.StdOut.Trim() -eq '{}') 'enc empty stdout {}'
+Assert-True (Test-Path -LiteralPath $emptyRun.ResultPath -PathType Leaf) 'enc empty result file'
+$emptyJson = Get-Content -Raw -Encoding utf8 -LiteralPath $emptyRun.ResultPath | ConvertFrom-Json
+Assert-True ($emptyJson.result -eq 'NOTIFY_FILTERED') 'enc empty filtered'
+Assert-True ($emptyRun.StdErr -match 'NOTIFY_RESULT=NOTIFY_FILTERED') 'enc empty stderr filtered'
+
+# Entrypoint UTF-8 BOM live queue + independent history artifact
+$bomLiveGen = 'enc-bom-live-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
+$bomLiveOut = Join-Path $stateRoot 'bom-live-out.txt'
+$bomLiveErr = Join-Path $stateRoot 'bom-live-err.txt'
+$bomLiveResult = Join-Path $stateRoot 'bom-live-result.json'
+$beforeBomHistory = @(
+    Get-ChildItem -LiteralPath $historyDir -Filter '*-sent.json' -File -ErrorAction SilentlyContinue
+)
+$bomLiveExit = Invoke-CursorHookCmd `
+    -Json (New-StopJson -Status 'completed' -GenerationId $bomLiveGen) `
+    -WorkDir $stateRoot -OutPath $bomLiveOut -ErrPath $bomLiveErr `
+    -Encoding $utf8Bom `
+    -HookArgs @(
+        '-RepoRoot', ('"{0}"' -f $root),
+        '-StateRoot', ('"{0}"' -f $stateRoot),
+        '-ResultPath', ('"{0}"' -f $bomLiveResult)
+    )
+$bomLiveStdout = [string](Get-Content -Raw -Encoding utf8 -LiteralPath $bomLiveOut)
+$bomLiveStderr = ''
+if (Test-Path -LiteralPath $bomLiveErr) {
+    $bomLiveStderr = [string](Get-Content -Raw -Encoding utf8 -LiteralPath $bomLiveErr)
+}
+Assert-True ($bomLiveExit -eq 0) 'utf8-bom live entrypoint exit 0'
+Assert-True ($bomLiveStdout.Trim() -eq '{}') 'utf8-bom live entrypoint stdout {}'
+Assert-True ([string]::IsNullOrWhiteSpace($bomLiveStderr)) 'utf8-bom live entrypoint stderr empty'
+Assert-True (Test-Path -LiteralPath $bomLiveResult -PathType Leaf) 'utf8-bom live result file'
+$bomLiveJson = Get-Content -Raw -Encoding utf8 -LiteralPath $bomLiveResult | ConvertFrom-Json
+Assert-True ($bomLiveJson.result -eq 'NOTIFY_SENT') 'utf8-bom live NOTIFY_SENT'
+$bomLiveNewSent = @(Wait-NewSentHistory -HistoryDir $historyDir -BeforeFiles $beforeBomHistory)
+Assert-True ($bomLiveNewSent.Count -ge 1) 'utf8-bom live created new sent json'
+$bomLiveMatched = @(
+    $bomLiveNewSent | Where-Object {
+        $content = Get-Content -Raw -Encoding utf8 -LiteralPath $_.FullName
+        $content -match [regex]::Escape($bomLiveGen)
+    }
+)
+Assert-True ($bomLiveMatched.Count -ge 1) 'utf8-bom live sent.json contains generation_id'
 
 # Uninstall preserves foreign hooks
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'scripts\uninstall-cursor-hook.ps1') `
