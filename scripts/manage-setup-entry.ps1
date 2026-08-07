@@ -13,7 +13,7 @@ $scriptDirectory = $PSScriptRoot
 $applicationRoot = Split-Path -Parent $scriptDirectory
 $baseMenuPath = Join-Path $scriptDirectory 'manage-setup.ps1'
 $chatGptBridgePath = Join-Path $applicationRoot 'integrations\chatgpt\start-chatgpt-bridge.ps1'
-$chatGptUserScriptPath = Join-Path $applicationRoot 'integrations\chatgpt\chatgpt-completion-watcher.user.js'
+$chatGptExtensionManifestPath = Join-Path $applicationRoot 'integrations\chatgpt\chrome-extension\manifest.json'
 $chatGptManagerUrl = 'http://127.0.0.1:43127/'
 
 if ([string]::IsNullOrWhiteSpace($scriptDirectory)) {
@@ -126,7 +126,7 @@ function Show-ChatGptWatchMenu {
         Write-Host '  1. 감시 bridge 시작'
         Write-Host '  2. 감시 bridge 종료'
         Write-Host '  3. ChatGPT 탭 관리 화면 열기'
-        Write-Host '  4. Tampermonkey userscript 위치 열기'
+        Write-Host '  4. Chrome 확장 프로그램 위치 열기'
         Write-Host '  5. 상태 확인'
         Write-Host '  0. 뒤로'
         Write-Host
@@ -143,19 +143,21 @@ function Show-ChatGptWatchMenu {
                     Pause-Setup
                 }
                 '4' {
-                    if (-not (Test-Path -LiteralPath $script:ChatGptUserScriptPath -PathType Leaf)) {
-                        throw "userscript를 찾지 못했습니다: $script:ChatGptUserScriptPath"
+                    if (-not (Test-Path -LiteralPath $script:ChatGptExtensionManifestPath -PathType Leaf)) {
+                        throw "Chrome 확장 manifest를 찾지 못했습니다: $script:ChatGptExtensionManifestPath"
                     }
-                    Start-Process explorer.exe -ArgumentList @('/select,', ('"{0}"' -f $script:ChatGptUserScriptPath)) | Out-Null
+                    Start-Process explorer.exe -ArgumentList @('/select,', ('"{0}"' -f $script:ChatGptExtensionManifestPath)) | Out-Null
                     Write-Host
-                    Write-Host '[INFO] userscript 파일 위치를 열었습니다.'
-                    Write-Host '       Tampermonkey에 이 파일 내용을 등록하세요.'
+                    Write-Host '[INFO] Chrome 확장 프로그램 폴더를 열었습니다.'
+                    Write-Host '       chrome://extensions 에서 개발자 모드를 켠 뒤'
+                    Write-Host '       압축해제된 확장 프로그램 로드로 이 폴더를 한 번 등록하세요.'
                     Pause-Setup
                 }
                 '5' {
                     Write-Host
                     Write-Host ("ChatGPT 감시: {0}" -f (Get-ChatGptBridgeStatusLabel))
                     Write-Host ("관리 화면: {0}" -f $script:ChatGptManagerUrl)
+                    Write-Host ("Chrome 확장: {0}" -f (Split-Path -Parent $script:ChatGptExtensionManifestPath))
                     Pause-Setup
                 }
                 '0' { return }
@@ -200,7 +202,7 @@ $source = $source.Replace(
 )
 
 $script:ChatGptBridgePath = $chatGptBridgePath
-$script:ChatGptUserScriptPath = $chatGptUserScriptPath
+$script:ChatGptExtensionManifestPath = $chatGptExtensionManifestPath
 $script:ChatGptManagerUrl = $chatGptManagerUrl
 
 Invoke-Expression $source
