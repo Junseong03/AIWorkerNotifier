@@ -59,8 +59,8 @@ function Save-Selections {
 }
 
 function Remove-StaleLegacyTabs {
-    # Chrome extension 탭은 heartbeat TTL로 삭제하지 않는다.
-    # Chrome snapshot에 실제로 존재하지 않을 때만 제거한다.
+    # Chrome extension 탭은 TTL로 삭제하지 않는다.
+    # 실제 Chrome tab removed / URL 이탈 이벤트가 왔을 때만 삭제한다.
     $cutoff = [DateTime]::UtcNow.AddSeconds(-1 * $legacyTabTtlSeconds)
     foreach ($id in @($tabs.Keys)) {
         if ($id -like 'chrome-*') { continue }
@@ -82,47 +82,67 @@ function HtmlEncode {
     return [Net.WebUtility]::HtmlEncode([string]$Value)
 }
 
+function Upsert-ChromeTab {
+    param(
+        [string]$Id,
+        [string]$Title,
+        [string]$Url,
+        [Nullable[bool]]$Generating = $null
+    )
+
+    $idValue = Limit-Text $Id 100
+    $titleValue = Limit-Text $Title 200
+    $urlValue = Limit-Text $Url 2048
+
+    if ([string]::IsNullOrWhiteSpace($idValue)) { return }
+    if ($idValue -notlike 'chrome-*') { return }
+    if (-not (Test-ChatGptUrl $urlValue)) { return }
+
+    $generatingValue = $false
+    if ($tabs.ContainsKey($idValue)) {
+        $generatingValue = [bool]$tabs[$idValue].Generating
+    }
+    if ($null -ne $Generating) {
+        $generatingValue = [bool]$Generating
+    }
+
+    $tabs[$idValue] = [pscustomobject]@{
+        TabId = $idValue
+        Title = $titleValue
+        Url = $urlValue
+        Generating = $generatingValue
+        LastSeenUtc = [DateTime]::UtcNow
+    }
+}
+
 function Apply-ChromeTabSnapshot {
     param($SnapshotTabs)
 
-    $snapshotIds = @{}
+    # Snapshot은 추가/갱신 전용이다.
+    # 불완전하거나 빈 snapshot 하나가 열린 탭을 지우는 일이 없도록 여기서는 삭제하지 않는다.
     foreach ($item in @($SnapshotTabs)) {
-        $id = Limit-Text ([string]$item.tabId) 100
-        $title = Limit-Text ([string]$item.title) 200
-        $url = Limit-Text ([string]$item.url) 2048
-
-        if ([string]::IsNullOrWhiteSpace($id)) { continue }
-        if ($id -notlike 'chrome-*') { continue }
-        if (-not (Test-ChatGptUrl $url)) { continue }
-
-        $snapshotIds[$id] = $true
-        $generating = $false
-        if ($tabs.ContainsKey($id)) {
-            $generating = [bool]$tabs[$id].Generating
-        }
-
-        $tabs[$id] = [pscustomobject]@{
-            TabId = $id
-            Title = $title
-            Url = $url
-            Generating = $generating
-            LastSeenUtc = [DateTime]::UtcNow
-        }
+        if ($null -eq $item) { continue }
+        Upsert-ChromeTab `
+            -Id ([string]$item.tabId) `
+            -Title ([string]$item.title) `
+            -Url ([string]$item.url)
     }
+}
 
-    $selectionChanged = $false
-    foreach ($id in @($tabs.Keys)) {
-        if ($id -notlike 'chrome-*') { continue }
-        if ($snapshotIds.ContainsKey($id)) { continue }
+function Remove-ChromeTab {
+    param([string]$Id)
 
-        $tabs.Remove($id)
-        if ($selectedTabs.ContainsKey($id)) {
-            $selectedTabs.Remove($id)
-            $selectionChanged = $true
-        }
+    $idValue = Limit-Text $Id 100
+    if ([string]::IsNullOrWhiteSpace($idValue)) { return }
+    if ($idValue -notlike 'chrome-*') { return }
+
+    if ($tabs.ContainsKey($idValue)) {
+        $tabs.Remove($idValue)
     }
-
-    if ($selectionChanged) { Save-Selections }
+    if ($selectedTabs.ContainsKey($idValue)) {
+        $selectedTabs.Remove($idValue)
+        Save-Selections
+    }
 }
 
 function Get-ManagementHtml {
@@ -164,12 +184,12 @@ body{font-family:Segoe UI,Malgun Gothic,sans-serif;max-width:980px;margin:40px a
 </head>
 <body>
 <h1>ChatGPT 탭 감시</h1>
-<p class="hint">Chrome이 보고한 현재 열린 ChatGPT 탭 중 완료 알림을 받을 탭을 선택하세요. 목록은 약 5초마다 갱신됩니다.</p>
+<p class="hint">Chrome에서 열린 ChatGPT 탭 중 완료 알림을 받을 탭을 선택하세요. 목록은 약 5초마다 갱신됩니다.</p>
 <form method="POST" action="/manage/select" class="panel">
 $listHtml
 <div class="actions"><button class="primary" type="submit">선택 저장</button><span>선택되지 않은 탭의 완료 이벤트는 무시됩니다.</span></div>
 </form>
-<p class="privacy">탭 존재 여부는 Chrome의 열린 탭 목록으로 판단합니다. DOM 감시는 생성 중/완료 상태만 확인하며 응답 본문과 입력한 프롬프트는 읽거나 전송하지 않습니다.</p>
+<p class="privacy">탭 목록은 Chrome의 탭 이벤트와 snapshot으로 유지합니다. snapshot 누락만으로 열린 탭을 삭제하지 않습니다. DOM 감시는 생성 중/완료 상태만 확인하며 응답 본문과 입력 프롬프트는 읽지 않습니다.</p>
 </body>
 </html>
 "@
@@ -204,19 +224,73 @@ function Write-HttpResponse {
     $Stream.Flush()
 }
 
-function Read-RequestBody {
-    param([IO.StreamReader]$Reader, [int]$ContentLength)
-    if ($ContentLength -le 0) { return '' }
-    if ($ContentLength -gt 65536) { throw 'request body too large' }
+function Read-HttpRequest {
+    param([IO.Stream]$Stream)
 
-    $buffer = New-Object char[] $ContentLength
-    $read = 0
-    while ($read -lt $ContentLength) {
-        $count = $Reader.Read($buffer, $read, $ContentLength - $read)
-        if ($count -le 0) { break }
-        $read += $count
+    # HTTP Content-Length는 문자 수가 아니라 바이트 수다.
+    # StreamReader로 UTF-8 문자를 Content-Length개 읽으면 한국어 제목이 포함된 JSON에서
+    # body 경계가 틀어질 수 있으므로, 헤더와 body를 모두 원시 바이트 기준으로 읽는다.
+    $maxHeaderBytes = 32768
+    $headerBytes = New-Object Collections.Generic.List[byte]
+
+    while ($true) {
+        $value = $Stream.ReadByte()
+        if ($value -lt 0) { throw 'connection closed before HTTP headers completed' }
+        $headerBytes.Add([byte]$value)
+
+        if ($headerBytes.Count -gt $maxHeaderBytes) { throw 'request headers too large' }
+        if ($headerBytes.Count -ge 4) {
+            $n = $headerBytes.Count
+            if (
+                $headerBytes[$n - 4] -eq 13 -and
+                $headerBytes[$n - 3] -eq 10 -and
+                $headerBytes[$n - 2] -eq 13 -and
+                $headerBytes[$n - 1] -eq 10
+            ) {
+                break
+            }
+        }
     }
-    return New-Object string($buffer, 0, $read)
+
+    $headerText = [Text.Encoding]::ASCII.GetString($headerBytes.ToArray())
+    $lines = $headerText -split "`r`n"
+    $requestLine = $lines[0]
+    $headers = @{}
+
+    for ($i = 1; $i -lt $lines.Length; $i++) {
+        $line = $lines[$i]
+        if ([string]::IsNullOrEmpty($line)) { break }
+        $separator = $line.IndexOf(':')
+        if ($separator -le 0) { continue }
+        $name = $line.Substring(0, $separator).Trim()
+        $value = $line.Substring($separator + 1).Trim()
+        $headers[$name] = $value
+    }
+
+    $contentLength = 0
+    if ($headers.ContainsKey('Content-Length')) {
+        if (-not [int]::TryParse([string]$headers['Content-Length'], [ref]$contentLength)) {
+            throw 'invalid Content-Length'
+        }
+    }
+    if ($contentLength -lt 0 -or $contentLength -gt 65536) {
+        throw 'request body too large'
+    }
+
+    $bodyBytes = New-Object byte[] $contentLength
+    $offset = 0
+    while ($offset -lt $contentLength) {
+        $count = $Stream.Read($bodyBytes, $offset, $contentLength - $offset)
+        if ($count -le 0) { throw 'connection closed before HTTP body completed' }
+        $offset += $count
+    }
+
+    $body = if ($contentLength -gt 0) { $utf8.GetString($bodyBytes) } else { '' }
+    return [pscustomobject]@{
+        RequestLine = $requestLine
+        Headers = $headers
+        Body = $body
+    }
 }
 
 function Parse-JsonBody {
@@ -245,7 +319,7 @@ $selectedTabs = Load-Selections
 $listener = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, $Port)
 $listener.Start()
 Write-Host "ChatGPT tab manager: http://127.0.0.1:$Port/"
-Write-Host 'Chrome 확장 프로그램의 열린 탭 snapshot을 기준으로 감시 목록을 유지합니다.'
+Write-Host 'Chrome 탭 이벤트 + 비파괴 snapshot으로 감시 목록을 유지합니다.'
 Write-Host '응답 내용과 프롬프트는 수집하지 않습니다. 종료: Ctrl+C'
 
 try {
@@ -255,31 +329,20 @@ try {
             $client.ReceiveTimeout = 5000
             $client.SendTimeout = 5000
             $stream = $client.GetStream()
-            $reader = New-Object IO.StreamReader($stream, [Text.Encoding]::UTF8, $false, 2048, $true)
+            $request = Read-HttpRequest $stream
 
-            $requestLine = $reader.ReadLine()
-            if ([string]::IsNullOrWhiteSpace($requestLine) -or $requestLine -notmatch '^(GET|POST)\s+(\S+)\s+HTTP/') {
+            if ([string]::IsNullOrWhiteSpace($request.RequestLine) -or $request.RequestLine -notmatch '^(GET|POST)\s+(\S+)\s+HTTP/') {
                 Write-HttpResponse $stream 400 'Bad Request'
                 continue
             }
 
             $method = $Matches[1]
             $target = $Matches[2]
-            $contentLength = 0
             $clientMarker = ''
-
-            while ($true) {
-                $line = $reader.ReadLine()
-                if ($null -eq $line -or $line.Length -eq 0) { break }
-                $separator = $line.IndexOf(':')
-                if ($separator -le 0) { continue }
-                $name = $line.Substring(0, $separator).Trim()
-                $value = $line.Substring($separator + 1).Trim()
-                if ($name -ieq 'Content-Length') { [void][int]::TryParse($value, [ref]$contentLength) }
-                if ($name -ieq 'X-AIWorkerNotifier-Client') { $clientMarker = $value }
+            if ($request.Headers.ContainsKey('X-AIWorkerNotifier-Client')) {
+                $clientMarker = [string]$request.Headers['X-AIWorkerNotifier-Client']
             }
-
-            $body = Read-RequestBody $reader $contentLength
+            $body = [string]$request.Body
 
             if ($method -eq 'GET' -and ($target -eq '/' -or $target -eq '/manage')) {
                 Write-HttpResponse $stream 200 'OK' (Get-ManagementHtml) 'text/html; charset=utf-8'
@@ -312,6 +375,13 @@ try {
                 continue
             }
 
+            if ($method -eq 'POST' -and $target -eq '/api/tabs/remove') {
+                $data = Parse-JsonBody $body
+                Remove-ChromeTab ([string]$data.tabId)
+                Write-HttpResponse $stream 204 'No Content'
+                continue
+            }
+
             if ($method -eq 'POST' -and $target -eq '/api/tabs/heartbeat') {
                 $data = Parse-JsonBody $body
                 $id = Limit-Text ([string]$data.tabId) 100
@@ -323,12 +393,17 @@ try {
                     continue
                 }
 
-                $tabs[$id] = [pscustomobject]@{
-                    TabId = $id
-                    Title = $title
-                    Url = $url
-                    Generating = ([bool]$data.generating)
-                    LastSeenUtc = [DateTime]::UtcNow
+                if ($id -like 'chrome-*') {
+                    Upsert-ChromeTab -Id $id -Title $title -Url $url -Generating ([bool]$data.generating)
+                }
+                else {
+                    $tabs[$id] = [pscustomobject]@{
+                        TabId = $id
+                        Title = $title
+                        Url = $url
+                        Generating = ([bool]$data.generating)
+                        LastSeenUtc = [DateTime]::UtcNow
+                    }
                 }
 
                 $response = @{ selected = $selectedTabs.ContainsKey($id) } | ConvertTo-Json -Compress
