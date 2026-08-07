@@ -10,6 +10,57 @@
   let idleSince = 0;
   let completionSentForCurrentTurn = false;
   let selectedForNotifications = false;
+  let stopped = false;
+  let scheduled = false;
+  let observer = null;
+  let checkIntervalId = null;
+  let heartbeatIntervalId = null;
+
+  function isExtensionContextInvalid(error) {
+    return String(error?.message || error || '').includes('Extension context invalidated');
+  }
+
+  function stopWatcher() {
+    if (stopped) return;
+    stopped = true;
+
+    try { observer?.disconnect(); } catch (_) {}
+    if (checkIntervalId !== null) window.clearInterval(checkIntervalId);
+    if (heartbeatIntervalId !== null) window.clearInterval(heartbeatIntervalId);
+
+    window.removeEventListener('focus', sendHeartbeat);
+    window.removeEventListener('pageshow', sendHeartbeat);
+
+    // 다음 유효한 extension context가 다시 주입될 때 시작할 수 있도록 해제한다.
+    try { delete window.__AI_WORKER_NOTIFIER_CHATGPT_WATCHER__; } catch (_) {}
+  }
+
+  function safeSendMessage(message, callback) {
+    if (stopped) return false;
+
+    try {
+      chrome.runtime.sendMessage(message, (response) => {
+        if (stopped) return;
+        try {
+          if (chrome.runtime.lastError) {
+            if (isExtensionContextInvalid(chrome.runtime.lastError)) stopWatcher();
+            return;
+          }
+          callback?.(response);
+        } catch (error) {
+          if (isExtensionContextInvalid(error)) stopWatcher();
+        }
+      });
+      return true;
+    } catch (error) {
+      if (isExtensionContextInvalid(error)) {
+        stopWatcher();
+        return false;
+      }
+      console.warn('[AIWorkerNotifier] extension message failed:', error);
+      return false;
+    }
+  }
 
   function isVisible(element) {
     if (!element || !element.isConnected) return false;
@@ -38,26 +89,27 @@
   }
 
   function sendHeartbeat() {
+    if (stopped) return;
     const generating = hasVisibleStopControl();
-    chrome.runtime.sendMessage({
+    safeSendMessage({
       type: 'heartbeat',
       title: document.title || 'ChatGPT',
       generating
     }, (response) => {
-      if (chrome.runtime.lastError) return;
       selectedForNotifications = response?.selected === true;
     });
   }
 
   function sendCompletion() {
-    if (!selectedForNotifications) return;
-    chrome.runtime.sendMessage({
+    if (stopped || !selectedForNotifications) return;
+    safeSendMessage({
       type: 'completed',
       title: document.title || 'ChatGPT'
-    }, () => void chrome.runtime.lastError);
+    });
   }
 
   function checkState() {
+    if (stopped) return;
     const generating = hasVisibleStopControl();
     const now = Date.now();
 
@@ -84,9 +136,8 @@
     sendHeartbeat();
   }
 
-  let scheduled = false;
-  const observer = new MutationObserver(() => {
-    if (scheduled) return;
+  observer = new MutationObserver(() => {
+    if (stopped || scheduled) return;
     scheduled = true;
     window.setTimeout(() => {
       scheduled = false;
@@ -101,8 +152,8 @@
     attributeFilter: ['aria-label', 'data-testid', 'hidden']
   });
 
-  window.setInterval(checkState, CHECK_INTERVAL_MS);
-  window.setInterval(sendHeartbeat, HEARTBEAT_INTERVAL_MS);
+  checkIntervalId = window.setInterval(checkState, CHECK_INTERVAL_MS);
+  heartbeatIntervalId = window.setInterval(sendHeartbeat, HEARTBEAT_INTERVAL_MS);
   window.addEventListener('focus', sendHeartbeat);
   window.addEventListener('pageshow', sendHeartbeat);
 
