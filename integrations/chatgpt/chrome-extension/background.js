@@ -1,6 +1,9 @@
 const BRIDGE_BASE = 'http://127.0.0.1:43127';
 const HEARTBEAT_URL = `${BRIDGE_BASE}/api/tabs/heartbeat`;
 const COMPLETION_URL = `${BRIDGE_BASE}/api/tabs/completed`;
+const RESCAN_INTERVAL_MS = 5000;
+
+let scanInFlight = false;
 
 async function postJson(url, payload) {
   try {
@@ -8,7 +11,7 @@ async function postJson(url, payload) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json; charset=utf-8',
-        'X-AIWorkerNotifier-Client': 'chatgpt-userscript'
+        'X-AIWorkerNotifier-Client': 'chatgpt-extension'
       },
       body: JSON.stringify(payload),
       cache: 'no-store'
@@ -47,16 +50,27 @@ async function injectWatcher(tabId) {
       files: ['content.js']
     });
   } catch (_) {
-    // Restricted, discarded, or not-yet-ready tabs are harmless; normal navigation injects later.
+    // Restricted, discarded, or not-yet-ready tabs are harmless; later scans retry.
   }
 }
 
+async function refreshTab(tab) {
+  if (!tab || !Number.isInteger(tab.id) || !isChatGptUrl(tab.url)) return;
+  await registerTab(tab, false);
+  await injectWatcher(tab.id);
+}
+
 async function scanExistingTabs() {
-  const tabs = await chrome.tabs.query({});
-  for (const tab of tabs) {
-    if (!isChatGptUrl(tab.url)) continue;
-    await registerTab(tab, false);
-    await injectWatcher(tab.id);
+  if (scanInFlight) return;
+  scanInFlight = true;
+  try {
+    const tabs = await chrome.tabs.query({});
+    for (const tab of tabs) {
+      if (!isChatGptUrl(tab.url)) continue;
+      await refreshTab(tab);
+    }
+  } finally {
+    scanInFlight = false;
   }
 }
 
@@ -69,14 +83,21 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 chrome.tabs.onCreated.addListener((tab) => {
-  if (isChatGptUrl(tab.url)) registerTab(tab, false);
+  if (isChatGptUrl(tab.url)) refreshTab(tab).catch(() => {});
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (!isChatGptUrl(tab.url)) return;
   if (changeInfo.url || changeInfo.title || changeInfo.status === 'complete') {
-    registerTab(tab, false);
+    refreshTab(tab).catch(() => {});
   }
+});
+
+chrome.tabs.onActivated.addListener(async ({ tabId }) => {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    await refreshTab(tab);
+  } catch (_) {}
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -112,3 +133,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 scanExistingTabs().catch(() => {});
+setInterval(() => {
+  scanExistingTabs().catch(() => {});
+}, RESCAN_INTERVAL_MS);
