@@ -1,6 +1,17 @@
 (() => {
-  if (window.__AI_WORKER_NOTIFIER_CHATGPT_WATCHER__) return;
-  window.__AI_WORKER_NOTIFIER_CHATGPT_WATCHER__ = true;
+  const WATCHER_KEY = '__AI_WORKER_NOTIFIER_CHATGPT_WATCHER_V2__';
+  const WATCHER_VERSION = '0.1.2';
+  const existing = window[WATCHER_KEY];
+
+  if (existing?.version === WATCHER_VERSION && existing?.active === true) return;
+  try { existing?.stop?.(); } catch (_) {}
+
+  const watcherState = {
+    version: WATCHER_VERSION,
+    active: true,
+    stop: null
+  };
+  window[WATCHER_KEY] = watcherState;
 
   const CHECK_INTERVAL_MS = 500;
   const HEARTBEAT_INTERVAL_MS = 3000;
@@ -23,6 +34,7 @@
   function stopWatcher() {
     if (stopped) return;
     stopped = true;
+    watcherState.active = false;
 
     try { observer?.disconnect(); } catch (_) {}
     if (checkIntervalId !== null) window.clearInterval(checkIntervalId);
@@ -31,9 +43,12 @@
     window.removeEventListener('focus', sendHeartbeat);
     window.removeEventListener('pageshow', sendHeartbeat);
 
-    // 다음 유효한 extension context가 다시 주입될 때 시작할 수 있도록 해제한다.
-    try { delete window.__AI_WORKER_NOTIFIER_CHATGPT_WATCHER__; } catch (_) {}
+    if (window[WATCHER_KEY] === watcherState) {
+      try { delete window[WATCHER_KEY]; } catch (_) {}
+    }
   }
+
+  watcherState.stop = stopWatcher;
 
   function safeSendMessage(message, callback) {
     if (stopped) return false;
