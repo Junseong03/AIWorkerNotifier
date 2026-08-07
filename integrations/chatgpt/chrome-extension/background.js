@@ -1,9 +1,12 @@
 const BRIDGE_BASE = 'http://127.0.0.1:43127';
+const SNAPSHOT_URL = `${BRIDGE_BASE}/api/tabs/snapshot`;
 const HEARTBEAT_URL = `${BRIDGE_BASE}/api/tabs/heartbeat`;
 const COMPLETION_URL = `${BRIDGE_BASE}/api/tabs/completed`;
-const RESCAN_INTERVAL_MS = 5000;
+const SNAPSHOT_MIN_INTERVAL_MS = 2000;
+const ALARM_NAME = 'ai-worker-notifier-chatgpt-tab-sync';
 
-let scanInFlight = false;
+let syncInFlight = false;
+let lastSnapshotAt = 0;
 
 async function postJson(url, payload) {
   try {
@@ -21,7 +24,7 @@ async function postJson(url, payload) {
     }
     return response;
   } catch (error) {
-    console.warn('[AIWorkerNotifier] local bridge unavailable:', error);
+    // 브리지가 꺼져 있을 때는 정상적인 오프라인 상태이므로 치명 오류로 취급하지 않는다.
     return null;
   }
 }
@@ -33,14 +36,13 @@ function isChatGptUrl(url) {
   );
 }
 
-async function registerTab(tab, generating = false) {
-  if (!tab || !Number.isInteger(tab.id) || !isChatGptUrl(tab.url)) return;
-  await postJson(HEARTBEAT_URL, {
+function toSnapshotTab(tab) {
+  if (!tab || !Number.isInteger(tab.id) || !isChatGptUrl(tab.url)) return null;
+  return {
     tabId: `chrome-${tab.id}`,
     title: tab.title || 'ChatGPT',
-    url: tab.url,
-    generating: Boolean(generating)
-  });
+    url: tab.url
+  };
 }
 
 async function injectWatcher(tabId) {
@@ -50,54 +52,72 @@ async function injectWatcher(tabId) {
       files: ['content.js']
     });
   } catch (_) {
-    // Restricted, discarded, or not-yet-ready tabs are harmless; later scans retry.
+    // 아직 로딩 중이거나 폐기된 탭은 navigation/content_script 경로에서 다시 붙는다.
   }
 }
 
-async function refreshTab(tab) {
-  if (!tab || !Number.isInteger(tab.id) || !isChatGptUrl(tab.url)) return;
-  await registerTab(tab, false);
-  await injectWatcher(tab.id);
-}
+async function syncOpenChatGptTabs({ force = false, inject = false } = {}) {
+  const now = Date.now();
+  if (!force && now - lastSnapshotAt < SNAPSHOT_MIN_INTERVAL_MS) return;
+  if (syncInFlight) return;
 
-async function scanExistingTabs() {
-  if (scanInFlight) return;
-  scanInFlight = true;
+  syncInFlight = true;
   try {
-    const tabs = await chrome.tabs.query({});
-    for (const tab of tabs) {
-      if (!isChatGptUrl(tab.url)) continue;
-      await refreshTab(tab);
+    const allTabs = await chrome.tabs.query({});
+    const chatGptTabs = allTabs.filter((tab) => isChatGptUrl(tab.url));
+    const snapshot = chatGptTabs.map(toSnapshotTab).filter(Boolean);
+
+    await postJson(SNAPSHOT_URL, { tabs: snapshot });
+    lastSnapshotAt = Date.now();
+
+    if (inject) {
+      for (const tab of chatGptTabs) {
+        await injectWatcher(tab.id);
+      }
     }
   } finally {
-    scanInFlight = false;
+    syncInFlight = false;
   }
+}
+
+function ensureFallbackAlarm() {
+  chrome.alarms.create(ALARM_NAME, { periodInMinutes: 1 });
 }
 
 chrome.runtime.onInstalled.addListener(() => {
-  scanExistingTabs().catch(console.warn);
+  ensureFallbackAlarm();
+  syncOpenChatGptTabs({ force: true, inject: true }).catch(() => {});
 });
 
 chrome.runtime.onStartup.addListener(() => {
-  scanExistingTabs().catch(console.warn);
+  ensureFallbackAlarm();
+  syncOpenChatGptTabs({ force: true, inject: true }).catch(() => {});
 });
 
-chrome.tabs.onCreated.addListener((tab) => {
-  if (isChatGptUrl(tab.url)) refreshTab(tab).catch(() => {});
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== ALARM_NAME) return;
+  syncOpenChatGptTabs({ force: true, inject: false }).catch(() => {});
+});
+
+chrome.tabs.onCreated.addListener(() => {
+  syncOpenChatGptTabs({ force: true, inject: false }).catch(() => {});
+});
+
+chrome.tabs.onRemoved.addListener(() => {
+  syncOpenChatGptTabs({ force: true, inject: false }).catch(() => {});
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (!isChatGptUrl(tab.url)) return;
   if (changeInfo.url || changeInfo.title || changeInfo.status === 'complete') {
-    refreshTab(tab).catch(() => {});
+    syncOpenChatGptTabs({ force: true, inject: false }).catch(() => {});
+  }
+  if (isChatGptUrl(tab.url) && changeInfo.status === 'complete') {
+    injectWatcher(tabId).catch(() => {});
   }
 });
 
-chrome.tabs.onActivated.addListener(async ({ tabId }) => {
-  try {
-    const tab = await chrome.tabs.get(tabId);
-    await refreshTab(tab);
-  } catch (_) {}
+chrome.tabs.onActivated.addListener(() => {
+  syncOpenChatGptTabs({ force: true, inject: false }).catch(() => {});
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -105,6 +125,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!tab || !Number.isInteger(tab.id) || !isChatGptUrl(tab.url)) return;
 
   if (message?.type === 'heartbeat') {
+    // 어느 한 ChatGPT 탭의 heartbeat만 살아 있어도 Chrome 자체 탭 목록을 다시 동기화한다.
+    // 따라서 다른 탭의 content script가 잠시 재시작되어도 열린 탭 자체는 목록에서 사라지지 않는다.
+    syncOpenChatGptTabs({ force: false, inject: false }).catch(() => {});
+
     postJson(HEARTBEAT_URL, {
       tabId: `chrome-${tab.id}`,
       title: tab.title || message.title || 'ChatGPT',
@@ -132,7 +156,5 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
-scanExistingTabs().catch(() => {});
-setInterval(() => {
-  scanExistingTabs().catch(() => {});
-}, RESCAN_INTERVAL_MS);
+ensureFallbackAlarm();
+syncOpenChatGptTabs({ force: true, inject: true }).catch(() => {});
