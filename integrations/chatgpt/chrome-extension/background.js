@@ -8,7 +8,7 @@ async function postJson(url, payload) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json; charset=utf-8',
-        'X-AIWorkerNotifier-Client': 'chatgpt-extension'
+        'X-AIWorkerNotifier-Client': 'chatgpt-userscript'
       },
       body: JSON.stringify(payload),
       cache: 'no-store'
