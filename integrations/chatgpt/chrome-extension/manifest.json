@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "AIWorkerNotifier ChatGPT Watcher",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Detects ChatGPT tabs and reports response-generation state to the local AIWorkerNotifier bridge without reading response text.",
   "permissions": [
     "tabs",
