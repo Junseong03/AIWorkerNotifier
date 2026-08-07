@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param()
 
 Set-StrictMode -Version Latest
@@ -23,6 +23,7 @@ if (-not (Test-Path -LiteralPath $baseMenuPath -PathType Leaf)) {
     throw "기본 설정 메뉴를 찾지 못했습니다: $baseMenuPath"
 }
 
+# Windows PowerShell 5.1 호환: 이 파일은 UTF-8 BOM으로 저장한다.
 # 기존 설정 메뉴를 원문 그대로 읽되 Invoke-Expression 환경에서는 $PSScriptRoot가
 # 비어 있으므로, 원본의 ScriptDirectory 초기화 한 줄만 현재 실제 경로로 치환한다.
 $source = [System.IO.File]::ReadAllText($baseMenuPath, [System.Text.Encoding]::UTF8)
