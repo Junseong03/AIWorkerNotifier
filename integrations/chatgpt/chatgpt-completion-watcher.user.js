@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AIWorkerNotifier - ChatGPT Completion Watcher
 // @namespace    https://github.com/Junseong03/AIWorkerNotifier
-// @version      0.1.0
-// @description  ChatGPT의 응답 생성 상태만 관찰하고 완료 시 로컬 AIWorkerNotifier에 알립니다. 응답 내용은 읽지 않습니다.
+// @version      0.2.0
+// @description  ChatGPT 탭을 로컬 AIWorkerNotifier에 등록하고, 선택된 탭의 응답 완료 상태만 알립니다. 응답 내용은 읽지 않습니다.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
 // @grant        GM_xmlhttpRequest
@@ -12,13 +12,27 @@
 (function () {
   'use strict';
 
-  const BRIDGE_URL = 'http://127.0.0.1:43127/ai-worker-notifier/chatgpt/completed';
+  const BRIDGE_BASE = 'http://127.0.0.1:43127';
+  const HEARTBEAT_URL = `${BRIDGE_BASE}/api/tabs/heartbeat`;
+  const COMPLETION_URL = `${BRIDGE_BASE}/api/tabs/completed`;
   const CHECK_INTERVAL_MS = 500;
+  const HEARTBEAT_INTERVAL_MS = 3000;
   const COMPLETION_SETTLE_MS = 1200;
+
+  const TAB_ID_KEY = 'aiWorkerNotifierChatGptTabId';
+  let tabId = window.sessionStorage.getItem(TAB_ID_KEY);
+  if (!tabId) {
+    tabId = (window.crypto && typeof window.crypto.randomUUID === 'function')
+      ? window.crypto.randomUUID()
+      : `tab-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    window.sessionStorage.setItem(TAB_ID_KEY, tabId);
+  }
 
   let wasGenerating = false;
   let idleSince = 0;
   let completionSentForCurrentTurn = false;
+  let selectedForNotifications = false;
+  let lastHeartbeatSignature = '';
 
   function isVisible(element) {
     if (!element || !element.isConnected) return false;
@@ -48,20 +62,63 @@
     return false;
   }
 
-  function notifyCompletion() {
+  function postJson(url, payload, onSuccess) {
     GM_xmlhttpRequest({
       method: 'POST',
-      url: BRIDGE_URL,
-      headers: { 'Content-Type': 'text/plain; charset=utf-8' },
-      data: 'response-complete',
+      url,
+      headers: {
+        'Content-Type': 'application/json; charset=utf-8',
+        'X-AIWorkerNotifier-Client': 'chatgpt-userscript'
+      },
+      data: JSON.stringify(payload),
       timeout: 3000,
       onload: (response) => {
         if (response.status < 200 || response.status >= 300) {
-          console.warn('[AIWorkerNotifier] completion bridge returned', response.status);
+          console.warn('[AIWorkerNotifier] bridge returned', response.status, url);
+          return;
         }
+        if (onSuccess) onSuccess(response);
       },
-      onerror: () => console.warn('[AIWorkerNotifier] completion bridge is unavailable.'),
-      ontimeout: () => console.warn('[AIWorkerNotifier] completion bridge timed out.')
+      onerror: () => console.warn('[AIWorkerNotifier] local bridge is unavailable.'),
+      ontimeout: () => console.warn('[AIWorkerNotifier] local bridge timed out.')
+    });
+  }
+
+  function currentTabMetadata(generating) {
+    return {
+      tabId,
+      title: document.title || 'ChatGPT',
+      url: window.location.href,
+      generating: Boolean(generating)
+    };
+  }
+
+  function sendHeartbeat(force) {
+    const generating = hasVisibleStopControl();
+    const metadata = currentTabMetadata(generating);
+    const signature = `${metadata.title}|${metadata.url}|${metadata.generating}`;
+    if (!force && signature === lastHeartbeatSignature) {
+      // 목록에서 탭이 살아있음을 알리기 위해 정기 heartbeat는 계속 전송한다.
+    }
+    lastHeartbeatSignature = signature;
+
+    postJson(HEARTBEAT_URL, metadata, (response) => {
+      try {
+        const result = JSON.parse(response.responseText || '{}');
+        selectedForNotifications = result.selected === true;
+      } catch (_) {
+        selectedForNotifications = false;
+      }
+    });
+  }
+
+  function notifyCompletion() {
+    if (!selectedForNotifications) return;
+
+    postJson(COMPLETION_URL, {
+      tabId,
+      title: document.title || 'ChatGPT',
+      url: window.location.href
     });
   }
 
@@ -89,9 +146,10 @@
     wasGenerating = false;
     idleSince = 0;
     notifyCompletion();
+    sendHeartbeat(true);
   }
 
-  // DOM 변경을 신호로 사용하되, UI 변화가 없는 경우도 놓치지 않도록 저빈도 확인을 병행한다.
+  // DOM 변경은 상태 재확인의 신호로만 사용한다. 응답 텍스트는 읽지 않는다.
   let scheduled = false;
   const observer = new MutationObserver(() => {
     if (scheduled) return;
@@ -110,6 +168,11 @@
   });
 
   window.setInterval(checkState, CHECK_INTERVAL_MS);
+  window.setInterval(() => sendHeartbeat(false), HEARTBEAT_INTERVAL_MS);
+  window.addEventListener('focus', () => sendHeartbeat(true));
+  window.addEventListener('pageshow', () => sendHeartbeat(true));
+
   checkState();
-  console.info('[AIWorkerNotifier] ChatGPT completion watcher active (status-only DOM observation).');
+  sendHeartbeat(true);
+  console.info(`[AIWorkerNotifier] ChatGPT tab registered: ${tabId} (status-only DOM observation).`);
 })();
