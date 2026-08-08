@@ -16,10 +16,10 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $aiTaskComplete = Join-Path $repoRoot 'bin\ai-task-complete.internal.ps1'
 $runtimeRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'AIWorkerNotifier'
 $stateRoot = Join-Path $runtimeRoot 'state'
-$selectionPath = Join-Path $stateRoot 'chatgpt-selected-tabs.json'
+$disabledTabsPath = Join-Path $stateRoot 'chatgpt-disabled-tabs.json'
 $legacyTabTtlSeconds = 30
 $tabs = @{}
-$selectedTabs = @{}
+$disabledTabs = @{}
 
 if (-not (Test-Path -LiteralPath $aiTaskComplete)) {
     throw "ai-task-complete 진입점을 찾을 수 없습니다: $aiTaskComplete"
@@ -34,10 +34,10 @@ function Limit-Text {
     return $clean
 }
 
-function Load-Selections {
-    if (-not (Test-Path -LiteralPath $selectionPath)) { return @{} }
+function Load-DisabledTabs {
+    if (-not (Test-Path -LiteralPath $disabledTabsPath)) { return @{} }
     try {
-        $raw = [IO.File]::ReadAllText($selectionPath, $utf8)
+        $raw = [IO.File]::ReadAllText($disabledTabsPath, $utf8)
         if ([string]::IsNullOrWhiteSpace($raw)) { return @{} }
         $items = $raw | ConvertFrom-Json
         $result = @{}
@@ -48,24 +48,33 @@ function Load-Selections {
         return $result
     }
     catch {
-        Write-Warning ("ChatGPT 탭 선택 상태를 읽지 못했습니다: {0}" -f $_.Exception.Message)
+        Write-Warning ("ChatGPT 탭 알림 제외 상태를 읽지 못했습니다: {0}" -f $_.Exception.Message)
         return @{}
     }
 }
 
-function Save-Selections {
-    $ids = @($selectedTabs.Keys | Sort-Object)
-    [IO.File]::WriteAllText($selectionPath, ($ids | ConvertTo-Json), $utf8)
+function Save-DisabledTabs {
+    $ids = @($disabledTabs.Keys | Sort-Object)
+    $json = if ($ids.Count -eq 0) { '[]' } else { $ids | ConvertTo-Json }
+    [IO.File]::WriteAllText($disabledTabsPath, $json, $utf8)
 }
 
 function Remove-StaleLegacyTabs {
     # Chrome extension 탭은 TTL로 삭제하지 않는다.
     # 실제 Chrome tab removed / URL 이탈 이벤트가 왔을 때만 삭제한다.
     $cutoff = [DateTime]::UtcNow.AddSeconds(-1 * $legacyTabTtlSeconds)
+    $disabledChanged = $false
     foreach ($id in @($tabs.Keys)) {
         if ($id -like 'chrome-*') { continue }
-        if ($tabs[$id].LastSeenUtc -lt $cutoff) { $tabs.Remove($id) }
+        if ($tabs[$id].LastSeenUtc -lt $cutoff) {
+            $tabs.Remove($id)
+            if ($disabledTabs.ContainsKey($id)) {
+                $disabledTabs.Remove($id)
+                $disabledChanged = $true
+            }
+        }
     }
+    if ($disabledChanged) { Save-DisabledTabs }
 }
 
 function Test-ChatGptUrl {
@@ -139,9 +148,9 @@ function Remove-ChromeTab {
     if ($tabs.ContainsKey($idValue)) {
         $tabs.Remove($idValue)
     }
-    if ($selectedTabs.ContainsKey($idValue)) {
-        $selectedTabs.Remove($idValue)
-        Save-Selections
+    if ($disabledTabs.ContainsKey($idValue)) {
+        $disabledTabs.Remove($idValue)
+        Save-DisabledTabs
     }
 }
 
@@ -150,7 +159,8 @@ function Get-ManagementHtml {
     $rows = New-Object Collections.Generic.List[string]
 
     foreach ($tab in @($tabs.Values | Sort-Object Title, Url)) {
-        $checked = if ($selectedTabs.ContainsKey($tab.TabId)) { ' checked' } else { '' }
+        # 새로 감지된 탭은 기본 ON. 사용자가 명시적으로 체크 해제한 탭만 disabledTabs에 저장한다.
+        $checked = if (-not $disabledTabs.ContainsKey($tab.TabId)) { ' checked' } else { '' }
         $state = if ($tab.Generating) { '응답 생성 중' } else { '대기 중' }
         $shortId = if ($tab.TabId.Length -gt 12) { $tab.TabId.Substring(0, 12) } else { $tab.TabId }
         $rows.Add((@"
@@ -184,10 +194,10 @@ body{font-family:Segoe UI,Malgun Gothic,sans-serif;max-width:980px;margin:40px a
 </head>
 <body>
 <h1>ChatGPT 탭 감시</h1>
-<p class="hint">Chrome에서 열린 ChatGPT 탭 중 완료 알림을 받을 탭을 선택하세요. 목록은 약 5초마다 갱신됩니다.</p>
+<p class="hint">새로 감지된 ChatGPT 탭은 기본적으로 알림 ON입니다. 알림을 받지 않을 탭만 체크 해제하세요. 목록은 약 5초마다 갱신됩니다.</p>
 <form method="POST" action="/manage/select" class="panel">
 $listHtml
-<div class="actions"><button class="primary" type="submit">선택 저장</button><span>선택되지 않은 탭의 완료 이벤트는 무시됩니다.</span></div>
+<div class="actions"><button class="primary" type="submit">선택 저장</button><span>체크 해제한 탭의 완료 이벤트만 무시됩니다.</span></div>
 </form>
 <p class="privacy">탭 목록은 Chrome의 탭 이벤트와 snapshot으로 유지합니다. snapshot 누락만으로 열린 탭을 삭제하지 않습니다. DOM 감시는 생성 중/완료 상태만 확인하며 응답 본문과 입력 프롬프트는 읽지 않습니다.</p>
 </body>
@@ -300,8 +310,20 @@ function Parse-JsonBody {
 }
 
 function Queue-ChatGptCompletion {
-    param($Tab)
+    param(
+        $Tab,
+        [string]$TurnId = ''
+    )
+
     $summaryTitle = Limit-Text ([string]$Tab.Title) 160
+    $turnIdValue = Limit-Text $TurnId 80
+    $dispatchId = if ([string]::IsNullOrWhiteSpace($turnIdValue)) {
+        [string]$Tab.TabId
+    }
+    else {
+        "{0}:{1}" -f $Tab.TabId, $turnIdValue
+    }
+
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $aiTaskComplete `
         -Task $summaryTitle `
         -Status 'RESPONSE_COMPLETE' `
@@ -312,13 +334,14 @@ function Queue-ChatGptCompletion {
         -Scope 'local_phase' `
         -Outcome 'success' `
         -Project 'ChatGPT' `
-        -DispatchId $Tab.TabId
+        -DispatchId $dispatchId
 }
 
-$selectedTabs = Load-Selections
+$disabledTabs = Load-DisabledTabs
 $listener = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, $Port)
 $listener.Start()
 Write-Host "ChatGPT tab manager: http://127.0.0.1:$Port/"
+Write-Host '새로 감지된 ChatGPT 탭은 기본 알림 ON이며, 체크 해제한 탭만 제외합니다.'
 Write-Host 'Chrome 탭 이벤트 + 비파괴 snapshot으로 감시 목록을 유지합니다.'
 Write-Host '응답 내용과 프롬프트는 수집하지 않습니다. 종료: Ctrl+C'
 
@@ -350,15 +373,23 @@ try {
             }
 
             if ($method -eq 'POST' -and $target -eq '/manage/select') {
-                $newSelection = @{}
+                $enabledTabs = @{}
                 foreach ($pair in ($body -split '&')) {
                     if ($pair -match '^tabId=(.+)$') {
                         $id = [Uri]::UnescapeDataString(($Matches[1] -replace '\+', ' '))
-                        if ($tabs.ContainsKey($id)) { $newSelection[$id] = $true }
+                        if ($tabs.ContainsKey($id)) { $enabledTabs[$id] = $true }
                     }
                 }
-                $selectedTabs = $newSelection
-                Save-Selections
+
+                $newDisabledTabs = @{}
+                foreach ($id in @($tabs.Keys)) {
+                    if (-not $enabledTabs.ContainsKey($id)) {
+                        $newDisabledTabs[$id] = $true
+                    }
+                }
+                $disabledTabs = $newDisabledTabs
+                Save-DisabledTabs
+
                 Write-HttpResponse $stream 303 'See Other' '' 'text/plain; charset=utf-8' @{ Location = '/' }
                 continue
             }
@@ -406,7 +437,7 @@ try {
                     }
                 }
 
-                $response = @{ selected = $selectedTabs.ContainsKey($id) } | ConvertTo-Json -Compress
+                $response = @{ selected = (-not $disabledTabs.ContainsKey($id)) } | ConvertTo-Json -Compress
                 Write-HttpResponse $stream 200 'OK' $response 'application/json; charset=utf-8'
                 continue
             }
@@ -414,16 +445,17 @@ try {
             if ($method -eq 'POST' -and $target -eq '/api/tabs/completed') {
                 $data = Parse-JsonBody $body
                 $id = Limit-Text ([string]$data.tabId) 100
+                $turnId = Limit-Text ([string]$data.turnId) 80
 
-                if (-not $tabs.ContainsKey($id) -or -not $selectedTabs.ContainsKey($id)) {
+                if (-not $tabs.ContainsKey($id) -or $disabledTabs.ContainsKey($id)) {
                     Write-HttpResponse $stream 204 'No Content'
                     continue
                 }
 
                 $tab = $tabs[$id]
-                Queue-ChatGptCompletion $tab
+                Queue-ChatGptCompletion -Tab $tab -TurnId $turnId
                 Write-HttpResponse $stream 204 'No Content'
-                Write-Host ("[{0}] 선택 탭 완료 알림 큐 등록: {1}" -f (Get-Date -Format 'HH:mm:ss'), $tab.Title)
+                Write-Host ("[{0}] 활성 탭 완료 알림 큐 등록: {1}" -f (Get-Date -Format 'HH:mm:ss'), $tab.Title)
                 continue
             }
 
