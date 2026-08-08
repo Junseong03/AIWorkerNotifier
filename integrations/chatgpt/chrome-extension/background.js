@@ -25,7 +25,6 @@ async function postJson(url, payload) {
     }
     return response;
   } catch (_) {
-    // 브리지가 꺼져 있는 것은 정상적인 오프라인 상태다.
     return null;
   }
 }
@@ -52,9 +51,7 @@ async function injectWatcher(tabId) {
       target: { tabId },
       files: ['content.js']
     });
-  } catch (_) {
-    // 로딩 중/폐기된 탭은 navigation 또는 다음 동기화에서 다시 붙는다.
-  }
+  } catch (_) {}
 }
 
 async function removeTrackedTab(tabId) {
@@ -72,9 +69,6 @@ async function syncOpenChatGptTabs({ force = false, inject = false } = {}) {
     const allTabs = await chrome.tabs.query({});
     const chatGptTabs = allTabs.filter((tab) => isChatGptUrl(tab.url));
     const snapshot = chatGptTabs.map(toSnapshotTab).filter(Boolean);
-
-    // Snapshot은 bridge에서 추가/갱신 전용이다. 누락된 탭을 삭제하지 않는다.
-    // 삭제는 tabs.onRemoved / ChatGPT URL 이탈 이벤트로만 전달한다.
     await postJson(SNAPSHOT_URL, { tabs: snapshot });
     lastSnapshotAt = Date.now();
 
@@ -149,7 +143,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!tab || !Number.isInteger(tab.id) || !isChatGptUrl(tab.url)) return;
 
   if (message?.type === 'heartbeat') {
-    // Heartbeat는 생성 상태 갱신용이다. 탭의 존재/삭제 판단에는 사용하지 않는다.
     syncOpenChatGptTabs({ force: false, inject: false }).catch(() => {});
 
     postJson(HEARTBEAT_URL, {
@@ -173,8 +166,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     postJson(COMPLETION_URL, {
       tabId: `chrome-${tab.id}`,
       title: tab.title || message.title || 'ChatGPT',
-      url: tab.url
-    }).then(() => sendResponse({ ok: true }));
+      url: tab.url,
+      turnId: typeof message.turnId === 'string' ? message.turnId : '',
+      detectedAtUtc: typeof message.detectedAtUtc === 'string' ? message.detectedAtUtc : '',
+      detectionMode: typeof message.detectionMode === 'string' ? message.detectionMode : ''
+    }).then((response) => sendResponse({ ok: Boolean(response?.ok) }));
     return true;
   }
 });
