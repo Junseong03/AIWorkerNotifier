@@ -3,7 +3,7 @@ param(
     [switch]$Once,
     [switch]$DryRun,
     [switch]$Backlog,
-    [int]$PollIntervalSeconds = 2,
+    [int]$PollIntervalSeconds = 1,
     [int]$StartupGraceMinutes = 3,
     [int]$RequestTimeoutSeconds = 8,
     [int]$MaxSendAttempts = 2
@@ -280,15 +280,18 @@ function Process-OneEvent {
         }
 
         $key = [string]$event.completionKey
-        if ($SentIndex.ContainsKey($key)) {
+        $isChatGptCompletion = ([string]$event.source) -eq 'chatgpt-web-dom'
+        if (-not $isChatGptCompletion -and $SentIndex.ContainsKey($key)) {
             Move-EventFile -Path $processing -DirectoryName 'history' -Suffix 'duplicate' | Out-Null
             Write-NotifierLog 'info' ("duplicate event skipped: {0}" -f $event.eventId)
             return
         }
 
         Send-DiscordEvent $event
-        $SentIndex[$key] = [DateTime]::UtcNow.ToString('o')
-        Save-SentIndex $SentIndex
+        if (-not $isChatGptCompletion) {
+            $SentIndex[$key] = [DateTime]::UtcNow.ToString('o')
+            Save-SentIndex $SentIndex
+        }
         Move-EventFile -Path $processing -DirectoryName 'history' -Suffix 'sent' | Out-Null
         Write-NotifierLog 'info' ("event sent: {0}" -f $event.eventId)
     } catch {
