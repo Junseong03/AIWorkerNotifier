@@ -104,7 +104,6 @@ function Show-SetupBanner {
     }
 
     Write-Host ("[{0}] {1}" -f $script:SetupBannerLevel, $script:SetupBannerText) -ForegroundColor $color
-    Write-Host
 
     # 현재 다시 그리기에서 한 번 표시한 뒤 소비한다.
     # 화면 자체에는 다음 입력 전까지 그대로 남아 있다.
