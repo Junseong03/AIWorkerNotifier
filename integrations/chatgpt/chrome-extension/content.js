@@ -1,6 +1,6 @@
 (() => {
   const WATCHER_KEY = '__AI_WORKER_NOTIFIER_CHATGPT_WATCHER_V2__';
-  const WATCHER_VERSION = '0.1.6';
+  const WATCHER_VERSION = '0.1.7';
   const existing = window[WATCHER_KEY];
 
   if (existing?.version === WATCHER_VERSION && existing?.active === true) return;
@@ -9,10 +9,10 @@
   const watcherState = { version: WATCHER_VERSION, active: true, stop: null };
   window[WATCHER_KEY] = watcherState;
 
-  const CHECK_INTERVAL_MS = 150;
+  const CHECK_INTERVAL_MS = 100;
   const HEARTBEAT_INTERVAL_MS = 3000;
-  const SHORT_RESPONSE_GRACE_MS = 900;
-  const POST_GENERATION_SETTLE_MS = 250;
+  const SHORT_RESPONSE_GRACE_MS = 650;
+  const POST_GENERATION_SETTLE_MS = 100;
 
   let wasGenerating = false;
   let requestPending = false;
@@ -211,7 +211,7 @@
     window.setTimeout(() => {
       scheduled = false;
       checkState();
-    }, 50);
+    }, 25);
   });
 
   observer.observe(document.documentElement, {
