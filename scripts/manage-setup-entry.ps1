@@ -33,6 +33,28 @@ $source = $source.Replace(
     ("`$ScriptDirectory = '{0}'" -f $escapedScriptDirectory)
 )
 
+# 모든 하위 메뉴는 빈 Enter로 상위 화면으로 돌아간다.
+# 0 입력도 기존 호환을 위해 계속 허용하되 화면에는 Enter 동작을 안내한다.
+$source = $source.Replace(
+    "Write-Host '  0. 뒤로'",
+    "Write-Host '  Enter. 뒤로'"
+)
+$source = $source.Replace(
+    "'0' { return }",
+    "'' { return }`r`n                '0' { return }"
+)
+
+# 메인 화면에서만 exit 명령을 제공한다. PowerShell switch는 기본적으로
+# 대소문자를 구분하지 않으므로 exit / EXIT / Exit 모두 같은 동작을 한다.
+$source = $source.Replace(
+    "Write-Host '  0. 나가기'",
+    "Write-Host '  0 / exit. 나가기'"
+)
+$source = $source.Replace(
+    "'0' { Write-Host; Write-Host '종료합니다.'; exit 0 }",
+    "'0' { Write-Host; Write-Host '종료합니다.'; exit 0 }`r`n            'exit' { Write-Host; Write-Host '종료합니다.'; exit 0 }"
+)
+
 $marker = 'function Show-Menu {'
 if (-not $source.Contains($marker)) {
     throw '설정 메뉴 확장 지점을 찾지 못했습니다. manage-setup.ps1 구조가 변경되었는지 확인하세요.'
@@ -190,7 +212,7 @@ function Show-ChatGptWatchMenu {
         Write-Host '  2. ChatGPT 탭 관리 화면 열기'
         Write-Host '  3. Chrome 확장 프로그램 위치 열기'
         Write-Host '  4. 상태 확인'
-        Write-Host '  0. 뒤로'
+        Write-Host '  Enter. 뒤로'
         Write-Host
 
         try {
@@ -221,6 +243,7 @@ function Show-ChatGptWatchMenu {
                     Write-Host ("Chrome 확장: {0}" -f (Split-Path -Parent $script:ChatGptExtensionManifestPath))
                     Pause-Setup
                 }
+                '' { return }
                 '0' { return }
                 default {
                     Write-Host
