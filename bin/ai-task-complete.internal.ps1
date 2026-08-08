@@ -121,6 +121,13 @@ try {
         (Limit-Text $DispatchId 120).ToLowerInvariant(),
         (Limit-Text $head 40).ToLowerInvariant()
     )
+
+    # ChatGPT의 한 탭에서는 여러 응답 완료 이벤트가 반복된다.
+    # 일반 작업의 중복 억제 규칙은 유지하되, ChatGPT 웹 완료 이벤트는 각 완료를 독립 이벤트로 취급한다.
+    if ($Source -ieq 'chatgpt-web-dom') {
+        $completionParts += $eventId.ToLowerInvariant()
+    }
+
     $completionKey = ($completionParts -join '|')
 
     $event = [ordered]@{
