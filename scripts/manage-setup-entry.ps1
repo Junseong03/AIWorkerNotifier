@@ -44,7 +44,7 @@ $source = $source.Replace(
 # exit는 숨은 단축 명령이며 PowerShell switch 특성상 대소문자를 구분하지 않는다.
 $source = $source.Replace(
     "'0' { Write-Host; Write-Host '종료합니다.'; exit 0 }",
-    "'0' { Write-Host; Write-Host '종료합니다.'; exit 0 }`r`n            'exit' { Write-Host; Write-Host '종료합니다.'; exit 0 }"
+    "'-1' { Start-BackgroundMode; Write-Host; Write-Host '백그라운드 실행을 확인했습니다. 설정 콘솔을 종료합니다.'; exit 0 }`r`n            '0' { Write-Host; Write-Host '종료합니다.'; exit 0 }`r`n            'exit' { Write-Host; Write-Host '종료합니다.'; exit 0 }"
 )
 
 # 기본 메뉴의 잘못된 번호 오류는 잠깐 출력 후 사라지지 않고,
@@ -240,6 +240,24 @@ function Switch-ChatGptBridge {
     Start-ChatGptBridge
 }
 
+function Start-BackgroundMode {
+    # 설정 콘솔과 실제 런타임 프로세스는 분리되어 있다.
+    # -1은 필요한 상주 프로세스가 실제로 켜져 있음을 보장한 뒤 콘솔만 종료한다.
+    if (-not (Test-NotificationDeliveryRunning)) {
+        Start-NotificationDelivery
+    }
+    if (-not (Test-ChatGptBridgeRunning)) {
+        Start-ChatGptBridge
+    }
+
+    if (-not (Test-NotificationDeliveryRunning)) {
+        throw '알림 전달 백그라운드 프로세스를 확인하지 못했습니다.'
+    }
+    if (-not (Test-ChatGptBridgeRunning)) {
+        throw 'ChatGPT 감시 백그라운드 프로세스를 확인하지 못했습니다.'
+    }
+}
+
 function Show-ChatGptWatchMenu {
     while ($true) {
         $watchStatus = Get-ChatGptBridgeStatusLabel
@@ -336,12 +354,16 @@ $source = $source.Replace(
     "Write-Host '  6. Cursor Hook'`r`n    Write-Host '  7. ChatGPT 감시'"
 )
 $source = $source.Replace(
+    "Write-Host '  0. 나가기'",
+    "Write-Host ' -1. 백그라운드 실행 후 나가기'`r`n    Write-Host '  0. 나가기'"
+)
+$source = $source.Replace(
     "'6' { Show-CursorHookMenu }",
     "'6' { Show-CursorHookMenu }`r`n            '7' { Show-ChatGptWatchMenu }"
 )
 $source = $source.Replace(
     "Set-SetupBanner -Level 'ERROR' -Message '0~6 사이 숫자를 입력하세요.'",
-    "Set-SetupBanner -Level 'ERROR' -Message '0~7 사이 숫자를 입력하세요.'"
+    "Set-SetupBanner -Level 'ERROR' -Message '-1 또는 0~7 사이 숫자를 입력하세요.'"
 )
 
 $script:ChatGptBridgePath = $chatGptBridgePath
