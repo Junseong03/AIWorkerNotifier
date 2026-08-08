@@ -1,6 +1,6 @@
 (() => {
   const WATCHER_KEY = '__AI_WORKER_NOTIFIER_CHATGPT_WATCHER_V2__';
-  const WATCHER_VERSION = '0.1.5';
+  const WATCHER_VERSION = '0.1.6';
   const existing = window[WATCHER_KEY];
 
   if (existing?.version === WATCHER_VERSION && existing?.active === true) return;
@@ -11,13 +11,13 @@
 
   const CHECK_INTERVAL_MS = 150;
   const HEARTBEAT_INTERVAL_MS = 3000;
-  const COMPLETION_SETTLE_MS = 700;
-  const SUBMIT_GRACE_MS = 250;
+  const SHORT_RESPONSE_GRACE_MS = 900;
+  const POST_GENERATION_SETTLE_MS = 250;
 
   let wasGenerating = false;
   let requestPending = false;
   let requestStartedAt = 0;
-  let lastRelevantMutationAt = 0;
+  let generationEndedAt = 0;
   let completionSentForCurrentTurn = false;
   let stopped = false;
   let scheduled = false;
@@ -40,6 +40,7 @@
     window.removeEventListener('pageshow', sendHeartbeat);
     document.removeEventListener('submit', onSubmit, true);
     document.removeEventListener('click', onClick, true);
+    document.removeEventListener('keydown', onKeyDown, true);
     if (window[WATCHER_KEY] === watcherState) {
       try { delete window[WATCHER_KEY]; } catch (_) {}
     }
@@ -96,10 +97,28 @@
     return false;
   }
 
+  function hasReadySendControl() {
+    const selectors = [
+      'button[data-testid="send-button"]',
+      'button[aria-label="Send prompt"]',
+      'button[aria-label="Send message"]',
+      'button[aria-label="보내기"]'
+    ];
+    for (const selector of selectors) {
+      for (const button of document.querySelectorAll(selector)) {
+        if (!isVisible(button)) continue;
+        if (button.disabled) continue;
+        if (button.getAttribute('aria-disabled') === 'true') continue;
+        return true;
+      }
+    }
+    return false;
+  }
+
   function markRequestPending() {
     requestPending = true;
     requestStartedAt = Date.now();
-    lastRelevantMutationAt = requestStartedAt;
+    generationEndedAt = 0;
     completionSentForCurrentTurn = false;
   }
 
@@ -121,6 +140,15 @@
     }
   }
 
+  function onKeyDown(event) {
+    if (event.defaultPrevented || event.isComposing) return;
+    if (event.key !== 'Enter' || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) return;
+    const target = event.target;
+    if (!target) return;
+    const editable = target.closest?.('textarea, [contenteditable="true"]');
+    if (editable) markRequestPending();
+  }
+
   function sendHeartbeat() {
     if (stopped) return;
     safeSendMessage({
@@ -132,8 +160,6 @@
 
   function sendCompletion() {
     if (stopped) return;
-    // 선택 여부는 content script가 캐시하지 않는다.
-    // 모든 완료 이벤트를 bridge로 보내고 bridge가 현재 선택 상태로 최종 필터링한다.
     safeSendMessage({
       type: 'completed',
       title: document.title || 'ChatGPT'
@@ -149,28 +175,38 @@
       wasGenerating = true;
       requestPending = true;
       if (requestStartedAt === 0) requestStartedAt = now;
-      lastRelevantMutationAt = now;
+      generationEndedAt = 0;
       completionSentForCurrentTurn = false;
       return;
     }
 
+    if (wasGenerating && generationEndedAt === 0) {
+      generationEndedAt = now;
+    }
+
     if (completionSentForCurrentTurn) return;
     if (!requestPending && !wasGenerating) return;
-    if (now - requestStartedAt < SUBMIT_GRACE_MS) return;
-    if (now - lastRelevantMutationAt < COMPLETION_SETTLE_MS) return;
+
+    const readyToSendAgain = hasReadySendControl();
+    if (!readyToSendAgain) return;
+
+    if (wasGenerating) {
+      if (generationEndedAt === 0 || now - generationEndedAt < POST_GENERATION_SETTLE_MS) return;
+    } else {
+      if (requestStartedAt === 0 || now - requestStartedAt < SHORT_RESPONSE_GRACE_MS) return;
+    }
 
     completionSentForCurrentTurn = true;
     requestPending = false;
     wasGenerating = false;
     requestStartedAt = 0;
+    generationEndedAt = 0;
     sendCompletion();
     sendHeartbeat();
   }
 
   observer = new MutationObserver(() => {
-    if (stopped) return;
-    if (requestPending || wasGenerating) lastRelevantMutationAt = Date.now();
-    if (scheduled) return;
+    if (stopped || scheduled) return;
     scheduled = true;
     window.setTimeout(() => {
       scheduled = false;
@@ -182,11 +218,12 @@
     childList: true,
     subtree: true,
     attributes: true,
-    attributeFilter: ['aria-label', 'data-testid', 'hidden', 'disabled']
+    attributeFilter: ['aria-label', 'data-testid', 'hidden', 'disabled', 'aria-disabled']
   });
 
   document.addEventListener('submit', onSubmit, true);
   document.addEventListener('click', onClick, true);
+  document.addEventListener('keydown', onKeyDown, true);
   checkIntervalId = window.setInterval(checkState, CHECK_INTERVAL_MS);
   heartbeatIntervalId = window.setInterval(sendHeartbeat, HEARTBEAT_INTERVAL_MS);
   window.addEventListener('focus', sendHeartbeat);
