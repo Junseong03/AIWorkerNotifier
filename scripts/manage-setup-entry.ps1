@@ -33,26 +33,38 @@ $source = $source.Replace(
     ("`$ScriptDirectory = '{0}'" -f $escapedScriptDirectory)
 )
 
-# 모든 하위 메뉴는 빈 Enter로 상위 화면으로 돌아간다.
-# 0 입력도 기존 호환을 위해 계속 허용하되 화면에는 Enter 동작을 안내한다.
-$source = $source.Replace(
-    "Write-Host '  0. 뒤로'",
-    "Write-Host '  Enter. 뒤로'"
-)
+# 하위 메뉴의 표기는 기존처럼 0. 뒤로를 유지한다.
+# 빈 Enter도 숨은 단축 동작으로 상위 화면 복귀를 허용한다.
 $source = $source.Replace(
     "'0' { return }",
     "'' { return }`r`n                '0' { return }"
 )
 
-# 메인 화면에서만 exit 명령을 제공한다. PowerShell switch는 기본적으로
-# 대소문자를 구분하지 않으므로 exit / EXIT / Exit 모두 같은 동작을 한다.
-$source = $source.Replace(
-    "Write-Host '  0. 나가기'",
-    "Write-Host '  0 / exit. 나가기'"
-)
+# 메인 화면의 표기는 기존처럼 0. 나가기를 유지한다.
+# exit는 숨은 단축 명령이며 PowerShell switch 특성상 대소문자를 구분하지 않는다.
 $source = $source.Replace(
     "'0' { Write-Host; Write-Host '종료합니다.'; exit 0 }",
     "'0' { Write-Host; Write-Host '종료합니다.'; exit 0 }`r`n            'exit' { Write-Host; Write-Host '종료합니다.'; exit 0 }"
+)
+
+# 기본 메뉴의 잘못된 번호 오류는 잠깐 출력 후 사라지지 않고,
+# 다음 화면의 헤더 바로 아래에 배너로 표시한다.
+$source = [regex]::Replace(
+    $source,
+    "(?m)([ \t]*)Write-Host\r?\n[ \t]*Write-Host '\[ERROR\] ([^']+)'\r?\n[ \t]*Pause-Setup",
+    {
+        param($match)
+        $indent = $match.Groups[1].Value
+        $message = $match.Groups[2].Value.Replace("'", "''")
+        return $indent + "Set-SetupBanner -Level 'ERROR' -Message '" + $message + "'"
+    }
+)
+
+# 각 기본 메뉴의 제목 구분선 아래에 배너 출력 위치를 삽입한다.
+$source = [regex]::Replace(
+    $source,
+    "(?m)([ \t]*Clear-Host\r?\n[ \t]*Write-Host '============================================================'\r?\n[ \t]*Write-Host '[^']+'\r?\n[ \t]*Write-Host '============================================================'\r?\n)",
+    '$1        Show-SetupBanner' + "`r`n"
 )
 
 $marker = 'function Show-Menu {'
@@ -61,10 +73,43 @@ if (-not $source.Contains($marker)) {
 }
 
 $extensionFunctions = @'
+$script:SetupBannerLevel = ''
+$script:SetupBannerText = ''
+
 function Pause-Setup {
-    # 메뉴 선택 후 별도의 Enter 입력을 요구하지 않는다.
-    # 작업 결과를 짧게 보여준 뒤 현재 메뉴가 자동으로 다시 그려진다.
+    # 작업 결과는 잠깐 보여주되 별도의 Enter 입력은 요구하지 않는다.
     Start-Sleep -Milliseconds 350
+}
+
+function Set-SetupBanner {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('ERROR', 'WARNING', 'INFO')]
+        [string]$Level,
+        [Parameter(Mandatory = $true)]
+        [string]$Message
+    )
+
+    $script:SetupBannerLevel = $Level
+    $script:SetupBannerText = $Message
+}
+
+function Show-SetupBanner {
+    if ([string]::IsNullOrWhiteSpace($script:SetupBannerText)) { return }
+
+    $color = switch ($script:SetupBannerLevel) {
+        'ERROR' { 'Red' }
+        'WARNING' { 'Yellow' }
+        default { 'Cyan' }
+    }
+
+    Write-Host ("[{0}] {1}" -f $script:SetupBannerLevel, $script:SetupBannerText) -ForegroundColor $color
+    Write-Host
+
+    # 현재 다시 그리기에서 한 번 표시한 뒤 소비한다.
+    # 화면 자체에는 다음 입력 전까지 그대로 남아 있다.
+    $script:SetupBannerLevel = ''
+    $script:SetupBannerText = ''
 }
 
 function Get-SetupStatusColor {
@@ -205,6 +250,7 @@ function Show-ChatGptWatchMenu {
         Write-Host '============================================================'
         Write-Host '                   ChatGPT 감시'
         Write-Host '============================================================'
+        Show-SetupBanner
         Write-Host
         Write-SetupStatusLine -Name 'ChatGPT 감시' -Prefix '상태: ' -Value $watchStatus
         Write-Host
@@ -212,7 +258,7 @@ function Show-ChatGptWatchMenu {
         Write-Host '  2. ChatGPT 탭 관리 화면 열기'
         Write-Host '  3. Chrome 확장 프로그램 위치 열기'
         Write-Host '  4. 상태 확인'
-        Write-Host '  Enter. 뒤로'
+        Write-Host '  0. 뒤로'
         Write-Host
 
         try {
@@ -246,15 +292,13 @@ function Show-ChatGptWatchMenu {
                 '' { return }
                 '0' { return }
                 default {
-                    Write-Host
-                    Write-Host '[ERROR] 0~4 사이 숫자를 입력하세요.'
-                    Pause-Setup
+                    Set-SetupBanner -Level 'ERROR' -Message '0~4 사이 숫자를 입력하세요.'
                 }
             }
         }
         catch {
             Write-Host
-            Write-Host '[ERROR] ChatGPT 감시 작업에 실패했습니다.'
+            Write-Host '[ERROR] ChatGPT 감시 작업에 실패했습니다.' -ForegroundColor Red
             Write-Host "        $($_.Exception.Message)"
             Pause-Setup
         }
@@ -286,7 +330,7 @@ $source = $source.Replace(
 )
 $source = $source.Replace(
     'Write-Host ("  Hook 모드   {0}" -f $cursorHookMode)',
-    "Write-SetupStatusLine -Name 'Hook 모드' -Prefix '  Hook 모드   ' -Value `$cursorHookMode`r`n    Write-SetupStatusLine -Name 'ChatGPT 감시' -Prefix '  ChatGPT 감시 ' -Value `$chatGptWatchStatus"
+    "Write-SetupStatusLine -Name 'Hook 모드' -Prefix '  Hook 모드   ' -Value `$cursorHookMode`r`n    Write-SetupStatusLine -Name 'ChatGPT 감시' -Prefix '  ChatGPT 감시 ' -Value `$chatGptWatchStatus`r`n    Write-Host '------------------------------------------------------------'"
 )
 $source = $source.Replace(
     "Write-Host '  6. Cursor Hook'",
@@ -297,8 +341,8 @@ $source = $source.Replace(
     "'6' { Show-CursorHookMenu }`r`n            '7' { Show-ChatGptWatchMenu }"
 )
 $source = $source.Replace(
-    "'[ERROR] 0~6 사이 숫자를 입력하세요.'",
-    "'[ERROR] 0~7 사이 숫자를 입력하세요.'"
+    "Set-SetupBanner -Level 'ERROR' -Message '0~6 사이 숫자를 입력하세요.'",
+    "Set-SetupBanner -Level 'ERROR' -Message '0~7 사이 숫자를 입력하세요.'"
 )
 
 $script:ChatGptBridgePath = $chatGptBridgePath
