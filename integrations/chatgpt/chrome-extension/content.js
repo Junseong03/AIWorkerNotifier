@@ -1,6 +1,6 @@
 (() => {
   const WATCHER_KEY = '__AI_WORKER_NOTIFIER_CHATGPT_WATCHER_V2__';
-  const WATCHER_VERSION = '0.1.7';
+  const WATCHER_VERSION = '0.1.8';
   const existing = window[WATCHER_KEY];
 
   if (existing?.version === WATCHER_VERSION && existing?.active === true) return;
@@ -9,18 +9,27 @@
   const watcherState = { version: WATCHER_VERSION, active: true, stop: null };
   window[WATCHER_KEY] = watcherState;
 
-  const CHECK_INTERVAL_MS = 100;
+  const CHECK_INTERVAL_MS = 250;
   const HEARTBEAT_INTERVAL_MS = 3000;
-  const SHORT_RESPONSE_GRACE_MS = 650;
-  const POST_GENERATION_SETTLE_MS = 100;
+  const SHORT_RESPONSE_FALLBACK_MS = 500;
+  const SAME_SUBMIT_DEBOUNCE_MS = 1000;
+  const STOP_SELECTORS = [
+    'button[data-testid="stop-button"]',
+    'button[aria-label="Stop streaming"]',
+    'button[aria-label="Stop generating"]',
+    'button[aria-label="응답 중지"]',
+    'button[aria-label="생성 중지"]'
+  ];
+  const STOP_SELECTOR = STOP_SELECTORS.join(',');
 
-  let wasGenerating = false;
   let requestPending = false;
   let requestStartedAt = 0;
-  let generationEndedAt = 0;
+  let generationSeen = false;
+  let lastGenerating = false;
   let completionSentForCurrentTurn = false;
+  let baselineAssistantCount = 0;
+  let currentTurnId = '';
   let stopped = false;
-  let scheduled = false;
   let observer = null;
   let checkIntervalId = null;
   let heartbeatIntervalId = null;
@@ -82,14 +91,7 @@
   }
 
   function hasVisibleStopControl() {
-    const selectors = [
-      'button[data-testid="stop-button"]',
-      'button[aria-label="Stop streaming"]',
-      'button[aria-label="Stop generating"]',
-      'button[aria-label="응답 중지"]',
-      'button[aria-label="생성 중지"]'
-    ];
-    for (const selector of selectors) {
+    for (const selector of STOP_SELECTORS) {
       for (const control of document.querySelectorAll(selector)) {
         if (isVisible(control)) return true;
       }
@@ -97,29 +99,47 @@
     return false;
   }
 
-  function hasReadySendControl() {
-    const selectors = [
-      'button[data-testid="send-button"]',
-      'button[aria-label="Send prompt"]',
-      'button[aria-label="Send message"]',
-      'button[aria-label="보내기"]'
-    ];
-    for (const selector of selectors) {
-      for (const button of document.querySelectorAll(selector)) {
-        if (!isVisible(button)) continue;
-        if (button.disabled) continue;
-        if (button.getAttribute('aria-disabled') === 'true') continue;
-        return true;
-      }
-    }
-    return false;
+  function nodeContainsStopControl(node) {
+    if (!(node instanceof Element)) return false;
+    if (node.matches(STOP_SELECTOR)) return true;
+    return Boolean(node.querySelector(STOP_SELECTOR));
+  }
+
+  function assistantTurnCount() {
+    // 응답 본문은 읽지 않는다. assistant turn 컨테이너의 개수만 센다.
+    return document.querySelectorAll('[data-message-author-role="assistant"]').length;
+  }
+
+  function newTurnId() {
+    try {
+      if (typeof crypto?.randomUUID === 'function') return crypto.randomUUID();
+    } catch (_) {}
+    return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   }
 
   function markRequestPending() {
+    const now = Date.now();
+    if (requestPending && !completionSentForCurrentTurn && now - requestStartedAt < SAME_SUBMIT_DEBOUNCE_MS) {
+      return;
+    }
+
+    requestPending = true;
+    requestStartedAt = now;
+    generationSeen = false;
+    lastGenerating = false;
+    completionSentForCurrentTurn = false;
+    baselineAssistantCount = assistantTurnCount();
+    currentTurnId = newTurnId();
+  }
+
+  function ensureRequestFromGeneration() {
+    if (requestPending && !completionSentForCurrentTurn) return;
     requestPending = true;
     requestStartedAt = Date.now();
-    generationEndedAt = 0;
+    generationSeen = true;
     completionSentForCurrentTurn = false;
+    baselineAssistantCount = assistantTurnCount();
+    currentTurnId = newTurnId();
   }
 
   function onSubmit(event) {
@@ -158,60 +178,94 @@
     });
   }
 
-  function sendCompletion() {
-    if (stopped) return;
+  function completeCurrentTurn(mode) {
+    if (stopped || completionSentForCurrentTurn) return;
+    if (!requestPending && !generationSeen) return;
+
+    completionSentForCurrentTurn = true;
+    const turnId = currentTurnId || newTurnId();
     safeSendMessage({
       type: 'completed',
-      title: document.title || 'ChatGPT'
+      title: document.title || 'ChatGPT',
+      turnId,
+      detectedAtUtc: new Date().toISOString(),
+      detectionMode: mode
     });
+
+    requestPending = false;
+    requestStartedAt = 0;
+    generationSeen = false;
+    lastGenerating = false;
+    baselineAssistantCount = assistantTurnCount();
+    currentTurnId = '';
+    sendHeartbeat();
   }
 
   function checkState() {
     if (stopped) return;
-    const now = Date.now();
     const generating = hasVisibleStopControl();
 
     if (generating) {
-      wasGenerating = true;
-      requestPending = true;
-      if (requestStartedAt === 0) requestStartedAt = now;
-      generationEndedAt = 0;
-      completionSentForCurrentTurn = false;
+      if (!requestPending) ensureRequestFromGeneration();
+      generationSeen = true;
+      lastGenerating = true;
       return;
     }
 
-    if (wasGenerating && generationEndedAt === 0) {
-      generationEndedAt = now;
+    // 가장 신뢰할 수 있는 완료 신호: 이전 검사에서 Stop이 보였고 지금 사라졌다.
+    if (generationSeen && lastGenerating) {
+      completeCurrentTurn('stop-transition');
+      return;
     }
 
-    if (completionSentForCurrentTurn) return;
-    if (!requestPending && !wasGenerating) return;
-
-    const readyToSendAgain = hasReadySendControl();
-    if (!readyToSendAgain) return;
-
-    if (wasGenerating) {
-      if (generationEndedAt === 0 || now - generationEndedAt < POST_GENERATION_SETTLE_MS) return;
-    } else {
-      if (requestStartedAt === 0 || now - requestStartedAt < SHORT_RESPONSE_GRACE_MS) return;
+    // Stop 버튼이 너무 짧게 나타나 DOM 최종 상태에서 놓친 경우의 보조 경로.
+    // 응답 텍스트는 읽지 않고 assistant turn 컨테이너가 새로 생겼는지만 본다.
+    if (
+      requestPending &&
+      !generationSeen &&
+      requestStartedAt > 0 &&
+      Date.now() - requestStartedAt >= SHORT_RESPONSE_FALLBACK_MS &&
+      assistantTurnCount() > baselineAssistantCount
+    ) {
+      completeCurrentTurn('assistant-turn-fallback');
     }
-
-    completionSentForCurrentTurn = true;
-    requestPending = false;
-    wasGenerating = false;
-    requestStartedAt = 0;
-    generationEndedAt = 0;
-    sendCompletion();
-    sendHeartbeat();
   }
 
-  observer = new MutationObserver(() => {
-    if (stopped || scheduled) return;
-    scheduled = true;
-    window.setTimeout(() => {
-      scheduled = false;
-      checkState();
-    }, 25);
+  observer = new MutationObserver((records) => {
+    if (stopped) return;
+
+    let stopAdded = false;
+    let stopRemoved = false;
+
+    for (const record of records) {
+      if (record.type === 'childList') {
+        for (const node of record.addedNodes) {
+          if (nodeContainsStopControl(node)) stopAdded = true;
+        }
+        for (const node of record.removedNodes) {
+          if (nodeContainsStopControl(node)) stopRemoved = true;
+        }
+      } else if (record.type === 'attributes') {
+        const target = record.target;
+        if (target instanceof Element && target.matches(STOP_SELECTOR)) {
+          if (isVisible(target)) stopAdded = true;
+        }
+      }
+    }
+
+    if (stopAdded) {
+      if (!requestPending) ensureRequestFromGeneration();
+      generationSeen = true;
+      lastGenerating = true;
+    }
+
+    // 추가와 삭제가 polling 사이에 모두 일어나도 MutationRecord에는 남는다.
+    if (stopRemoved && generationSeen && !hasVisibleStopControl()) {
+      completeCurrentTurn('stop-removed');
+      return;
+    }
+
+    checkState();
   });
 
   observer.observe(document.documentElement, {
