@@ -159,35 +159,45 @@ function Stop-ChatGptBridge {
     Write-Host '[OK] ChatGPT 감시 bridge를 껐습니다.'
 }
 
+function Switch-ChatGptBridge {
+    if (Test-ChatGptBridgeRunning) {
+        Stop-ChatGptBridge
+        return
+    }
+
+    Start-ChatGptBridge
+}
+
 function Show-ChatGptWatchMenu {
     while ($true) {
+        $watchStatus = Get-ChatGptBridgeStatusLabel
+        $toggleLabel = if ($watchStatus -eq 'ON') { '감시 bridge 종료' } else { '감시 bridge 시작' }
+
         Clear-Host
         Write-Host '============================================================'
         Write-Host '                   ChatGPT 감시'
         Write-Host '============================================================'
         Write-Host
-        Write-Host ("상태: {0}" -f (Get-ChatGptBridgeStatusLabel))
+        Write-SetupStatusLine -Name 'ChatGPT 감시' -Prefix '상태: ' -Value $watchStatus
         Write-Host
-        Write-Host '  1. 감시 bridge 시작'
-        Write-Host '  2. 감시 bridge 종료'
-        Write-Host '  3. ChatGPT 탭 관리 화면 열기'
-        Write-Host '  4. Chrome 확장 프로그램 위치 열기'
-        Write-Host '  5. 상태 확인'
+        Write-Host ("  1. {0}" -f $toggleLabel)
+        Write-Host '  2. ChatGPT 탭 관리 화면 열기'
+        Write-Host '  3. Chrome 확장 프로그램 위치 열기'
+        Write-Host '  4. 상태 확인'
         Write-Host '  0. 뒤로'
         Write-Host
 
         try {
             switch (Read-Host '번호를 고르세요') {
-                '1' { Start-ChatGptBridge; Pause-Setup }
-                '2' { Stop-ChatGptBridge; Pause-Setup }
-                '3' {
+                '1' { Switch-ChatGptBridge; Pause-Setup }
+                '2' {
                     if (-not (Test-ChatGptBridgeRunning)) { Start-ChatGptBridge }
                     Start-Process $script:ChatGptManagerUrl | Out-Null
                     Write-Host
                     Write-Host '[OK] ChatGPT 탭 관리 화면을 열었습니다.'
                     Pause-Setup
                 }
-                '4' {
+                '3' {
                     if (-not (Test-Path -LiteralPath $script:ChatGptExtensionManifestPath -PathType Leaf)) {
                         throw "Chrome 확장 manifest를 찾지 못했습니다: $script:ChatGptExtensionManifestPath"
                     }
@@ -198,9 +208,9 @@ function Show-ChatGptWatchMenu {
                     Write-Host '       압축해제된 확장 프로그램 로드로 이 폴더를 한 번 등록하세요.'
                     Pause-Setup
                 }
-                '5' {
+                '4' {
                     Write-Host
-                    Write-Host ("ChatGPT 감시: {0}" -f (Get-ChatGptBridgeStatusLabel))
+                    Write-SetupStatusLine -Name 'ChatGPT 감시' -Prefix 'ChatGPT 감시: ' -Value (Get-ChatGptBridgeStatusLabel)
                     Write-Host ("관리 화면: {0}" -f $script:ChatGptManagerUrl)
                     Write-Host ("Chrome 확장: {0}" -f (Split-Path -Parent $script:ChatGptExtensionManifestPath))
                     Pause-Setup
@@ -208,7 +218,7 @@ function Show-ChatGptWatchMenu {
                 '0' { return }
                 default {
                     Write-Host
-                    Write-Host '[ERROR] 0~5 사이 숫자를 입력하세요.'
+                    Write-Host '[ERROR] 0~4 사이 숫자를 입력하세요.'
                     Pause-Setup
                 }
             }
