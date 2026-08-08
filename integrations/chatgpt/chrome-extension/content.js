@@ -1,6 +1,6 @@
 (() => {
   const WATCHER_KEY = '__AI_WORKER_NOTIFIER_CHATGPT_WATCHER_V2__';
-  const WATCHER_VERSION = '0.1.8';
+  const WATCHER_VERSION = '0.1.9';
   const existing = window[WATCHER_KEY];
 
   if (existing?.version === WATCHER_VERSION && existing?.active === true) return;
@@ -11,7 +11,7 @@
 
   const CHECK_INTERVAL_MS = 250;
   const HEARTBEAT_INTERVAL_MS = 3000;
-  const SHORT_RESPONSE_FALLBACK_MS = 500;
+  const STOP_ABSENCE_CONFIRM_MS = 500;
   const SAME_SUBMIT_DEBOUNCE_MS = 1000;
   const STOP_SELECTORS = [
     'button[data-testid="stop-button"]',
@@ -26,8 +26,8 @@
   let requestStartedAt = 0;
   let generationSeen = false;
   let lastGenerating = false;
+  let stopMissingSince = 0;
   let completionSentForCurrentTurn = false;
-  let baselineAssistantCount = 0;
   let currentTurnId = '';
   let stopped = false;
   let observer = null;
@@ -105,11 +105,6 @@
     return Boolean(node.querySelector(STOP_SELECTOR));
   }
 
-  function assistantTurnCount() {
-    // 응답 본문은 읽지 않는다. assistant turn 컨테이너의 개수만 센다.
-    return document.querySelectorAll('[data-message-author-role="assistant"]').length;
-  }
-
   function newTurnId() {
     try {
       if (typeof crypto?.randomUUID === 'function') return crypto.randomUUID();
@@ -127,8 +122,8 @@
     requestStartedAt = now;
     generationSeen = false;
     lastGenerating = false;
+    stopMissingSince = 0;
     completionSentForCurrentTurn = false;
-    baselineAssistantCount = assistantTurnCount();
     currentTurnId = newTurnId();
   }
 
@@ -137,8 +132,9 @@
     requestPending = true;
     requestStartedAt = Date.now();
     generationSeen = true;
+    lastGenerating = true;
+    stopMissingSince = 0;
     completionSentForCurrentTurn = false;
-    baselineAssistantCount = assistantTurnCount();
     currentTurnId = newTurnId();
   }
 
@@ -180,7 +176,7 @@
 
   function completeCurrentTurn(mode) {
     if (stopped || completionSentForCurrentTurn) return;
-    if (!requestPending && !generationSeen) return;
+    if (!generationSeen) return;
 
     completionSentForCurrentTurn = true;
     const turnId = currentTurnId || newTurnId();
@@ -196,38 +192,35 @@
     requestStartedAt = 0;
     generationSeen = false;
     lastGenerating = false;
-    baselineAssistantCount = assistantTurnCount();
+    stopMissingSince = 0;
     currentTurnId = '';
     sendHeartbeat();
   }
 
   function checkState() {
     if (stopped) return;
+    const now = Date.now();
     const generating = hasVisibleStopControl();
 
     if (generating) {
       if (!requestPending) ensureRequestFromGeneration();
       generationSeen = true;
       lastGenerating = true;
+      stopMissingSince = 0;
       return;
     }
 
-    // 가장 신뢰할 수 있는 완료 신호: 이전 검사에서 Stop이 보였고 지금 사라졌다.
+    // 일반 DOM 변경은 완료 신호로 사용하지 않는다.
+    // Stop 컨트롤을 실제로 관찰한 턴에서만, Mutation을 놓쳤을 경우에 한해
+    // 일정 시간 연속 부재를 확인한 뒤 보조 완료 처리한다.
     if (generationSeen && lastGenerating) {
-      completeCurrentTurn('stop-transition');
-      return;
-    }
-
-    // Stop 버튼이 너무 짧게 나타나 DOM 최종 상태에서 놓친 경우의 보조 경로.
-    // 응답 텍스트는 읽지 않고 assistant turn 컨테이너가 새로 생겼는지만 본다.
-    if (
-      requestPending &&
-      !generationSeen &&
-      requestStartedAt > 0 &&
-      Date.now() - requestStartedAt >= SHORT_RESPONSE_FALLBACK_MS &&
-      assistantTurnCount() > baselineAssistantCount
-    ) {
-      completeCurrentTurn('assistant-turn-fallback');
+      if (stopMissingSince === 0) {
+        stopMissingSince = now;
+        return;
+      }
+      if (now - stopMissingSince >= STOP_ABSENCE_CONFIRM_MS) {
+        completeCurrentTurn('stop-absence-confirmed');
+      }
     }
   }
 
@@ -249,6 +242,7 @@
         const target = record.target;
         if (target instanceof Element && target.matches(STOP_SELECTOR)) {
           if (isVisible(target)) stopAdded = true;
+          else stopRemoved = true;
         }
       }
     }
@@ -257,15 +251,14 @@
       if (!requestPending) ensureRequestFromGeneration();
       generationSeen = true;
       lastGenerating = true;
+      stopMissingSince = 0;
     }
 
-    // 추가와 삭제가 polling 사이에 모두 일어나도 MutationRecord에는 남는다.
+    // 실제 Stop 컨트롤 제거만 즉시 완료 신호로 사용한다.
+    // 입력창 텍스트 편집 등 다른 DOM 변경은 여기서 아무 동작도 하지 않는다.
     if (stopRemoved && generationSeen && !hasVisibleStopControl()) {
       completeCurrentTurn('stop-removed');
-      return;
     }
-
-    checkState();
   });
 
   observer.observe(document.documentElement, {
