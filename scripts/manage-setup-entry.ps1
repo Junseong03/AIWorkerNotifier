@@ -39,6 +39,12 @@ if (-not $source.Contains($marker)) {
 }
 
 $extensionFunctions = @'
+function Pause-Setup {
+    # 메뉴 선택 후 별도의 Enter 입력을 요구하지 않는다.
+    # 작업 결과를 짧게 보여준 뒤 현재 메뉴가 자동으로 다시 그려진다.
+    Start-Sleep -Milliseconds 350
+}
+
 function Get-SetupStatusColor {
     param(
         [Parameter(Mandatory = $true)]
