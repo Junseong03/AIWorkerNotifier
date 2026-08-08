@@ -39,6 +39,51 @@ if (-not $source.Contains($marker)) {
 }
 
 $extensionFunctions = @'
+function Get-SetupStatusColor {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+        [Parameter(Mandatory = $true)]
+        [string]$Value
+    )
+
+    switch ($Value) {
+        'ON' { return 'Green' }
+        '연결됨' { return 'Green' }
+        '설정됨' { return 'Green' }
+        '등록됨' { return 'Green' }
+        '설치됨' { return 'Green' }
+        'always' { return 'Green' }
+        'OFF' { return 'Red' }
+        '오류' { return 'Red' }
+        '잘못됨' { return 'Red' }
+        '스크립트 없음' { return 'Red' }
+        'unknown' { return 'Red' }
+        '없음' {
+            if ($Name -eq 'Webhook') { return 'Red' }
+            return 'Yellow'
+        }
+        '미등록' { return 'Yellow' }
+        '미설치' { return 'Yellow' }
+        'off' { return 'Yellow' }
+        default { return 'Cyan' }
+    }
+}
+
+function Write-SetupStatusLine {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+        [Parameter(Mandatory = $true)]
+        [string]$Prefix,
+        [Parameter(Mandatory = $true)]
+        [string]$Value
+    )
+
+    Write-Host $Prefix -NoNewline -ForegroundColor Gray
+    Write-Host $Value -ForegroundColor (Get-SetupStatusColor -Name $Name -Value $Value)
+}
+
 function Get-ChatGptBridgeProcesses {
     $processes = [System.Collections.Generic.List[object]]::new()
     $candidates = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
@@ -185,8 +230,24 @@ $source = $source.Replace(
     '$cursorHookMode = Get-CursorHookModeLabel' + "`r`n    `$chatGptWatchStatus = Get-ChatGptBridgeStatusLabel"
 )
 $source = $source.Replace(
+    'Write-Host ("  Webhook     {0}" -f $webhookStatus)',
+    "Write-SetupStatusLine -Name 'Webhook' -Prefix '  Webhook     ' -Value `$webhookStatus"
+)
+$source = $source.Replace(
+    'Write-Host ("  역할 멘션   {0}" -f $mentionStatus)',
+    "Write-SetupStatusLine -Name '역할 멘션' -Prefix '  역할 멘션   ' -Value `$mentionStatus"
+)
+$source = $source.Replace(
+    'Write-Host ("  명령 등록   {0}" -f $pathStatus)',
+    "Write-SetupStatusLine -Name '명령 등록' -Prefix '  명령 등록   ' -Value `$pathStatus"
+)
+$source = $source.Replace(
+    'Write-Host ("  Cursor Hook {0}" -f $cursorHookStatus)',
+    "Write-SetupStatusLine -Name 'Cursor Hook' -Prefix '  Cursor Hook ' -Value `$cursorHookStatus"
+)
+$source = $source.Replace(
     'Write-Host ("  Hook 모드   {0}" -f $cursorHookMode)',
-    'Write-Host ("  Hook 모드   {0}" -f $cursorHookMode)' + "`r`n    Write-Host (`"  ChatGPT 감시 {0}`" -f `$chatGptWatchStatus)"
+    "Write-SetupStatusLine -Name 'Hook 모드' -Prefix '  Hook 모드   ' -Value `$cursorHookMode`r`n    Write-SetupStatusLine -Name 'ChatGPT 감시' -Prefix '  ChatGPT 감시 ' -Value `$chatGptWatchStatus"
 )
 $source = $source.Replace(
     "Write-Host '  6. Cursor Hook'",
