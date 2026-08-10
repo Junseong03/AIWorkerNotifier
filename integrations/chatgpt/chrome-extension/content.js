@@ -1,6 +1,6 @@
 (() => {
   const WATCHER_KEY = '__AI_WORKER_NOTIFIER_CHATGPT_WATCHER_V2__';
-  const WATCHER_VERSION = '0.1.9';
+  const WATCHER_VERSION = '0.1.10';
   const existing = window[WATCHER_KEY];
 
   if (existing?.version === WATCHER_VERSION && existing?.active === true) return;
@@ -12,6 +12,8 @@
   const CHECK_INTERVAL_MS = 250;
   const HEARTBEAT_INTERVAL_MS = 3000;
   const STOP_ABSENCE_CONFIRM_MS = 500;
+  const COMPOSER_TRANSITION_WINDOW_MS = 1500;
+  const FINAL_ACTION_CONFIRM_MS = 500;
   const SAME_SUBMIT_DEBOUNCE_MS = 1000;
   const STOP_SELECTORS = [
     'button[data-testid="stop-button"]',
@@ -21,6 +23,11 @@
     'button[aria-label="생성 중지"]'
   ];
   const STOP_SELECTOR = STOP_SELECTORS.join(',');
+  const FINAL_ACTION_SELECTORS = [
+    'button[data-testid="copy-turn-action-button"]',
+    'button[data-testid="good-response-turn-action-button"]',
+    'button[data-testid="bad-response-turn-action-button"]'
+  ];
 
   let requestPending = false;
   let requestStartedAt = 0;
@@ -29,6 +36,14 @@
   let stopMissingSince = 0;
   let completionSentForCurrentTurn = false;
   let currentTurnId = '';
+
+  // 사용자가 답변 생성 중 composer를 편집하면 ChatGPT가 같은 영역의
+  // Stop/Send 컨트롤을 재구성할 수 있다. 이때의 Stop 소실은 완료로 보지 않는다.
+  // 입력 내용은 읽지 않고 input 이벤트 발생 시각만 기록한다.
+  let lastComposerEditAt = 0;
+  let stopRemovalTaintedByComposer = false;
+  let finalActionSeenSince = 0;
+
   let stopped = false;
   let observer = null;
   let checkIntervalId = null;
@@ -50,6 +65,7 @@
     document.removeEventListener('submit', onSubmit, true);
     document.removeEventListener('click', onClick, true);
     document.removeEventListener('keydown', onKeyDown, true);
+    document.removeEventListener('input', onComposerInput, true);
     if (window[WATCHER_KEY] === watcherState) {
       try { delete window[WATCHER_KEY]; } catch (_) {}
     }
@@ -105,11 +121,38 @@
     return Boolean(node.querySelector(STOP_SELECTOR));
   }
 
+  function isComposerEditable(target) {
+    if (!(target instanceof Element)) return false;
+    return Boolean(target.closest('textarea, [contenteditable="true"]'));
+  }
+
+  function getLatestAssistantTurnRoot() {
+    const assistants = document.querySelectorAll('[data-message-author-role="assistant"]');
+    if (assistants.length === 0) return null;
+    const assistant = assistants[assistants.length - 1];
+    return assistant.closest('article') || assistant.parentElement || assistant;
+  }
+
+  function hasLatestAssistantFinalAction() {
+    const root = getLatestAssistantTurnRoot();
+    if (!root) return false;
+    for (const selector of FINAL_ACTION_SELECTORS) {
+      if (root.querySelector(selector)) return true;
+    }
+    return false;
+  }
+
   function newTurnId() {
     try {
       if (typeof crypto?.randomUUID === 'function') return crypto.randomUUID();
     } catch (_) {}
     return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  }
+
+  function resetComposerTransitionState() {
+    lastComposerEditAt = 0;
+    stopRemovalTaintedByComposer = false;
+    finalActionSeenSince = 0;
   }
 
   function markRequestPending() {
@@ -125,6 +168,7 @@
     stopMissingSince = 0;
     completionSentForCurrentTurn = false;
     currentTurnId = newTurnId();
+    resetComposerTransitionState();
   }
 
   function ensureRequestFromGeneration() {
@@ -136,6 +180,7 @@
     stopMissingSince = 0;
     completionSentForCurrentTurn = false;
     currentTurnId = newTurnId();
+    resetComposerTransitionState();
   }
 
   function onSubmit(event) {
@@ -163,6 +208,16 @@
     if (!target) return;
     const editable = target.closest?.('textarea, [contenteditable="true"]');
     if (editable) markRequestPending();
+  }
+
+  function onComposerInput(event) {
+    if (!generationSeen) return;
+    if (!isComposerEditable(event.target)) return;
+
+    // 프롬프트 문자열은 읽지 않는다. 후속질문 편집이 발생했다는 사실만 기록한다.
+    lastComposerEditAt = Date.now();
+    stopMissingSince = 0;
+    finalActionSeenSince = 0;
   }
 
   function sendHeartbeat() {
@@ -194,7 +249,37 @@
     lastGenerating = false;
     stopMissingSince = 0;
     currentTurnId = '';
+    resetComposerTransitionState();
     sendHeartbeat();
+  }
+
+  function markComposerTaintedStopRemoval(now) {
+    stopRemovalTaintedByComposer = true;
+    stopMissingSince = 0;
+    finalActionSeenSince = 0;
+    if (lastComposerEditAt === 0) lastComposerEditAt = now;
+  }
+
+  function checkTaintedCompletion(now) {
+    if (!stopRemovalTaintedByComposer) return false;
+
+    // 후속질문 입력으로 Stop이 사라진 뒤에는 Stop 부재만으로 완료하지 않는다.
+    // 최신 assistant turn의 완료 후 액션 UI가 나타난 경우에만 보수적으로 완료한다.
+    // 텍스트/프롬프트/응답 내용은 읽지 않는다.
+    if (!hasLatestAssistantFinalAction()) {
+      finalActionSeenSince = 0;
+      return true;
+    }
+
+    if (finalActionSeenSince === 0) {
+      finalActionSeenSince = now;
+      return true;
+    }
+
+    if (now - finalActionSeenSince >= FINAL_ACTION_CONFIRM_MS) {
+      completeCurrentTurn('assistant-final-action-after-composer-edit');
+    }
+    return true;
   }
 
   function checkState() {
@@ -207,20 +292,38 @@
       generationSeen = true;
       lastGenerating = true;
       stopMissingSince = 0;
+
+      // 후속질문 입력 때문에 Stop이 잠깐 사라졌다가 다시 나타났다면
+      // 이후의 Stop 제거는 다시 정상적인 완료 신호로 사용할 수 있다.
+      if (stopRemovalTaintedByComposer) {
+        stopRemovalTaintedByComposer = false;
+        finalActionSeenSince = 0;
+      }
       return;
     }
 
-    // 일반 DOM 변경은 완료 신호로 사용하지 않는다.
-    // Stop 컨트롤을 실제로 관찰한 턴에서만, Mutation을 놓쳤을 경우에 한해
-    // 일정 시간 연속 부재를 확인한 뒤 보조 완료 처리한다.
-    if (generationSeen && lastGenerating) {
-      if (stopMissingSince === 0) {
-        stopMissingSince = now;
-        return;
-      }
-      if (now - stopMissingSince >= STOP_ABSENCE_CONFIRM_MS) {
-        completeCurrentTurn('stop-absence-confirmed');
-      }
+    if (!generationSeen || !lastGenerating) return;
+
+    // composer 편집 직후 Stop이 없어졌다면 동일 영역의 Stop→Send 재구성으로 본다.
+    if (
+      lastComposerEditAt > 0 &&
+      now - lastComposerEditAt <= COMPOSER_TRANSITION_WINDOW_MS
+    ) {
+      markComposerTaintedStopRemoval(now);
+      return;
+    }
+
+    // 한 번 composer 영향으로 오염된 Stop 제거는 시간이 지났다고 다시 완료로 승격하지 않는다.
+    // 실제 assistant 완료 UI를 별도로 확인해야 한다.
+    if (checkTaintedCompletion(now)) return;
+
+    // composer 편집과 무관한 평상시에는 Stop 부재를 짧게 재확인한다.
+    if (stopMissingSince === 0) {
+      stopMissingSince = now;
+      return;
+    }
+    if (now - stopMissingSince >= STOP_ABSENCE_CONFIRM_MS) {
+      completeCurrentTurn('stop-absence-confirmed');
     }
   }
 
@@ -252,11 +355,23 @@
       generationSeen = true;
       lastGenerating = true;
       stopMissingSince = 0;
+      if (stopRemovalTaintedByComposer) {
+        stopRemovalTaintedByComposer = false;
+        finalActionSeenSince = 0;
+      }
     }
 
-    // 실제 Stop 컨트롤 제거만 즉시 완료 신호로 사용한다.
-    // 입력창 텍스트 편집 등 다른 DOM 변경은 여기서 아무 동작도 하지 않는다.
     if (stopRemoved && generationSeen && !hasVisibleStopControl()) {
+      const now = Date.now();
+      if (
+        lastComposerEditAt > 0 &&
+        now - lastComposerEditAt <= COMPOSER_TRANSITION_WINDOW_MS
+      ) {
+        markComposerTaintedStopRemoval(now);
+        return;
+      }
+
+      if (stopRemovalTaintedByComposer) return;
       completeCurrentTurn('stop-removed');
     }
   });
@@ -271,6 +386,7 @@
   document.addEventListener('submit', onSubmit, true);
   document.addEventListener('click', onClick, true);
   document.addEventListener('keydown', onKeyDown, true);
+  document.addEventListener('input', onComposerInput, true);
   checkIntervalId = window.setInterval(checkState, CHECK_INTERVAL_MS);
   heartbeatIntervalId = window.setInterval(sendHeartbeat, HEARTBEAT_INTERVAL_MS);
   window.addEventListener('focus', sendHeartbeat);
