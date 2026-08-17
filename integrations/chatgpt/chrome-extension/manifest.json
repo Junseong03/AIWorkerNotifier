@@ -1,7 +1,8 @@
 {
   "manifest_version": 3,
   "name": "AIWorkerNotifier ChatGPT Watcher",
-  "version": "0.1.13",
+  "version": "0.1.14",
+  "minimum_chrome_version": "116",
   "description": "Detects ChatGPT tabs and reports response-generation state to the local AIWorkerNotifier bridge without reading response text.",
   "permissions": [
     "tabs",
