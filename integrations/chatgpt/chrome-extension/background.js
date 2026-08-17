@@ -19,6 +19,10 @@ const generatingByTab = new Map();
 const focusRequestsInFlight = new Set();
 const queuedFocusRequestIds = new Set();
 
+function logControl(event, detail = {}) {
+  console.info('[AIWorkerNotifier][browser-control]', event, detail);
+}
+
 async function postJson(url, payload) {
   try {
     const response = await fetch(url, {
@@ -34,7 +38,10 @@ async function postJson(url, payload) {
       console.warn('[AIWorkerNotifier] bridge returned', response.status, url);
     }
     return response;
-  } catch (_) {
+  } catch (error) {
+    if (url === FOCUS_ACK_URL) {
+      console.warn('[AIWorkerNotifier][browser-control] focus ACK transport failed', error);
+    }
     return null;
   }
 }
@@ -105,6 +112,11 @@ function toBrowserFocusAction(payload) {
     typeof payload.targetUrl !== 'string' ||
     canonicalChatGptUrl(payload.targetUrl) === ''
   ) {
+    logControl('invalid-focus-action', {
+      requestId: payload?.focusRequestId || '',
+      targetUrl: payload?.targetUrl || '',
+      openIfMissing: payload?.openIfMissing === true
+    });
     return null;
   }
   return {
@@ -221,13 +233,26 @@ async function createTargetTab(targetUrl) {
 async function postFocusAck({ requestId, tab, targetUrl, success, error, opened }) {
   const tabId = Number.isInteger(tab?.id) ? `chrome-${tab.id}` : '';
   const actualUrl = canonicalChatGptUrl(tab?.url) || canonicalChatGptUrl(targetUrl);
-  await postJson(FOCUS_ACK_URL, {
+  logControl('focus-ack-send', {
+    requestId,
+    tabId,
+    actualUrl,
+    success,
+    opened: Boolean(opened),
+    error
+  });
+  const response = await postJson(FOCUS_ACK_URL, {
     requestId,
     tabId,
     url: actualUrl,
     success,
     opened: Boolean(opened),
     error
+  });
+  logControl('focus-ack-result', {
+    requestId,
+    status: response?.status ?? null,
+    ok: response?.ok === true
   });
 }
 
@@ -242,20 +267,51 @@ async function applyBrowserFocusAction(action, allTabs) {
   try {
     const matches = matchingTargetTabs(allTabs, action.targetUrl);
     targetTab = chooseExistingTargetTab(matches, action.preferredTabId);
+    logControl('focus-action-resolve', {
+      requestId: action.requestId,
+      targetUrl: canonicalChatGptUrl(action.targetUrl),
+      openIfMissing: action.openIfMissing,
+      totalTabs: allTabs.length,
+      matchingTabs: matches.length,
+      preferredTabId: action.preferredTabId,
+      chosenTabId: Number.isInteger(targetTab?.id) ? `chrome-${targetTab.id}` : ''
+    });
 
     if (targetTab) {
       targetTab = await foregroundTab(targetTab);
       success = true;
+      logControl('focus-existing-tab-success', {
+        requestId: action.requestId,
+        tabId: `chrome-${targetTab.id}`,
+        windowId: targetTab.windowId
+      });
     } else if (action.openIfMissing) {
+      logControl('focus-create-tab-start', {
+        requestId: action.requestId,
+        targetUrl: canonicalChatGptUrl(action.targetUrl)
+      });
       targetTab = await createTargetTab(action.targetUrl);
       opened = true;
       targetTab = await foregroundTab(targetTab);
       success = true;
+      logControl('focus-create-tab-success', {
+        requestId: action.requestId,
+        tabId: `chrome-${targetTab.id}`,
+        windowId: targetTab.windowId
+      });
     } else {
       error = 'Matching Chrome tab was not found.';
+      logControl('focus-no-match-no-create', {
+        requestId: action.requestId,
+        targetUrl: canonicalChatGptUrl(action.targetUrl)
+      });
     }
   } catch (reason) {
     error = String(reason?.message || reason || 'Chrome tab focus failed');
+    console.warn('[AIWorkerNotifier][browser-control] focus action failed', {
+      requestId: action.requestId,
+      error
+    });
   }
 
   try {
@@ -274,9 +330,17 @@ async function applyBrowserFocusAction(action, allTabs) {
 
 function enqueueBrowserFocusAction(action) {
   if (!action?.requestId || queuedFocusRequestIds.has(action.requestId)) {
+    if (action?.requestId) {
+      logControl('focus-action-duplicate-suppressed', { requestId: action.requestId });
+    }
     return Promise.resolve();
   }
   queuedFocusRequestIds.add(action.requestId);
+  logControl('focus-action-queued', {
+    requestId: action.requestId,
+    targetUrl: canonicalChatGptUrl(action.targetUrl),
+    openIfMissing: action.openIfMissing
+  });
 
   const task = browserActionChain
     .then(async () => {
@@ -318,7 +382,8 @@ function ensureFocusSocket() {
       `${FOCUS_SOCKET_BASE}?version=${version}`,
       FOCUS_SOCKET_PROTOCOL
     );
-  } catch (_) {
+  } catch (error) {
+    console.warn('[AIWorkerNotifier][browser-control] WebSocket create failed', error);
     scheduleFocusSocketReconnect();
     return;
   }
@@ -326,7 +391,8 @@ function ensureFocusSocket() {
 
   socket.onopen = () => {
     if (focusSocket !== socket) return;
-    syncOpenChatGptTabs({ force: true, inject: false }).catch(() => {});
+    logControl('socket-open', { version: chrome.runtime.getManifest().version });
+    syncOpenChatGptTabs({ force: true, inject: true }).catch(() => {});
   };
 
   socket.onmessage = (event) => {
@@ -334,19 +400,34 @@ function ensureFocusSocket() {
     let payload;
     try {
       payload = JSON.parse(event.data);
-    } catch (_) {
+    } catch (error) {
+      console.warn('[AIWorkerNotifier][browser-control] invalid WebSocket JSON', error);
       return;
     }
     if (payload?.type === 'keepalive') return;
-    if (payload?.type !== 'focus-or-open') return;
+    if (payload?.type !== 'focus-or-open') {
+      logControl('socket-message-ignored', { type: payload?.type || '' });
+      return;
+    }
     const action = toBrowserFocusAction(payload);
     if (!action) return;
-    enqueueBrowserFocusAction(action).catch(() => {});
+    logControl('socket-focus-action-received', {
+      requestId: action.requestId,
+      targetUrl: canonicalChatGptUrl(action.targetUrl),
+      openIfMissing: action.openIfMissing,
+      preferredTabId: action.preferredTabId
+    });
+    enqueueBrowserFocusAction(action).catch((error) => {
+      console.warn('[AIWorkerNotifier][browser-control] queued action failed', error);
+    });
   };
 
-  socket.onerror = () => {};
-  socket.onclose = () => {
+  socket.onerror = (event) => {
+    console.warn('[AIWorkerNotifier][browser-control] WebSocket error', event);
+  };
+  socket.onclose = (event) => {
     if (focusSocket === socket) focusSocket = null;
+    logControl('socket-close', { code: event.code, reason: event.reason || '' });
     scheduleFocusSocketReconnect();
   };
 }
@@ -357,7 +438,15 @@ async function injectWatcher(tabId) {
       target: { tabId },
       files: ['content.js']
     });
-  } catch (_) {}
+    logControl('watcher-injected', { tabId: `chrome-${tabId}` });
+    return true;
+  } catch (error) {
+    console.warn('[AIWorkerNotifier][browser-control] watcher injection failed', {
+      tabId: `chrome-${tabId}`,
+      error: String(error?.message || error || '')
+    });
+    return false;
+  }
 }
 
 async function removeTrackedTab(tabId) {
@@ -383,6 +472,11 @@ async function syncOpenChatGptTabs({ force = false, inject = false } = {}) {
     // is pushed over the persistent localhost WebSocket channel.
     const focusAction = await readBrowserFocusAction(response);
     if (focusAction) {
+      logControl('snapshot-fallback-focus-action', {
+        requestId: focusAction.requestId,
+        targetUrl: canonicalChatGptUrl(focusAction.targetUrl),
+        openIfMissing: focusAction.openIfMissing
+      });
       await enqueueBrowserFocusAction(focusAction);
     }
 
@@ -488,8 +582,15 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   }
 });
 
-chrome.tabs.onActivated.addListener(() => {
+chrome.tabs.onActivated.addListener((activeInfo) => {
   ensureFocusSocket();
+  chrome.tabs.get(activeInfo.tabId)
+    .then((tab) => {
+      if (isChatGptUrl(tab.url)) {
+        injectWatcher(activeInfo.tabId).catch(() => {});
+      }
+    })
+    .catch(() => {});
   syncOpenChatGptTabs({ force: true, inject: false }).catch(() => {});
 });
 
@@ -518,6 +619,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         } catch (_) {}
       }
       if (focusRequestId) {
+        logControl('legacy-heartbeat-focus-action', {
+          requestId: focusRequestId,
+          tabId: `chrome-${tab.id}`
+        });
         await applyFocusRequest(tab, focusRequestId);
       }
       sendResponse({ selected });
