@@ -32,7 +32,7 @@ class WebSocketPeer:
     def __init__(self, sock: socket.socket, version: str) -> None:
         self.sock = sock
         self.version = version
-        self.send_lock = threading.Lock()
+        self.send_lock = threading.RLock()
         self.closed = False
         self.last_write = time.monotonic()
 
