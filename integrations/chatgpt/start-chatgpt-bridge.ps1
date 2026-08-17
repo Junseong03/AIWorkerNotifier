@@ -7,14 +7,32 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$implementationPath = Join-Path $PSScriptRoot 'start-chatgpt-bridge.impl.ps1'
-if (-not (Test-Path -LiteralPath $implementationPath)) {
-    throw "ChatGPT bridge implementation was not found: $implementationPath"
+$pythonExe = $null
+$pythonPrefixArgs = @()
+$configured = [string]$env:AI_WORKER_NOTIFIER_PYTHON
+
+if (-not [string]::IsNullOrWhiteSpace($configured) -and (Test-Path -LiteralPath $configured -PathType Leaf)) {
+    $pythonExe = (Resolve-Path -LiteralPath $configured).Path
+}
+elseif ($null -ne (Get-Command py.exe -ErrorAction SilentlyContinue)) {
+    $pythonExe = (Get-Command py.exe).Source
+    $pythonPrefixArgs = @('-3')
+}
+elseif ($null -ne (Get-Command python.exe -ErrorAction SilentlyContinue)) {
+    $pythonExe = (Get-Command python.exe).Source
+}
+else {
+    throw 'Python 3.10+ was not found. Set AI_WORKER_NOTIFIER_PYTHON or install Python.'
 }
 
-$utf8 = New-Object System.Text.UTF8Encoding($false)
-$source = [IO.File]::ReadAllText($implementationPath, $utf8)
-$bridgeSourceRoot = $PSScriptRoot
-$source = $source.Replace('$PSScriptRoot', '$bridgeSourceRoot')
-$scriptBlock = [ScriptBlock]::Create($source)
-. $scriptBlock -Port $Port
+Push-Location $PSScriptRoot
+try {
+    & $pythonExe @pythonPrefixArgs -m chatgpt_bridge.main --port $Port
+    $exitCode = $LASTEXITCODE
+}
+finally {
+    Pop-Location
+}
+
+if ($null -eq $exitCode) { $exitCode = 1 }
+exit $exitCode
