@@ -6,8 +6,10 @@ $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $bridgePath = Join-Path $repoRoot 'integrations\chatgpt\start-chatgpt-bridge.ps1'
+$bridgeImplementationPath = Join-Path $repoRoot 'integrations\chatgpt\start-chatgpt-bridge.impl.ps1'
 $backgroundPath = Join-Path $repoRoot 'integrations\chatgpt\chrome-extension\background.js'
 $manifestPath = Join-Path $repoRoot 'integrations\chatgpt\chrome-extension\manifest.json'
+$utf8 = New-Object System.Text.UTF8Encoding($false)
 
 function Assert-Contains {
     param([string]$Text, [string]$Pattern, [string]$Message)
@@ -19,21 +21,41 @@ function Assert-NotContains {
     if ($Text -match $Pattern) { throw $Message }
 }
 
-$parseTokens = $null
-$parseErrors = $null
-[void][System.Management.Automation.Language.Parser]::ParseFile(
-    $bridgePath,
-    [ref]$parseTokens,
-    [ref]$parseErrors
-)
-if (@($parseErrors).Count -gt 0) {
-    $messages = @($parseErrors | ForEach-Object { $_.Message }) -join '; '
-    throw "ChatGPT bridge PowerShell parse failed: $messages"
+function Read-And-AssertPowerShellUtf8 {
+    param([string]$Path, [string]$Label)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "$Label was not found: $Path"
+    }
+
+    $source = [IO.File]::ReadAllText($Path, $utf8)
+    $parseTokens = $null
+    $parseErrors = $null
+    [void][System.Management.Automation.Language.Parser]::ParseInput(
+        $source,
+        [ref]$parseTokens,
+        [ref]$parseErrors
+    )
+    if (@($parseErrors).Count -gt 0) {
+        $messages = @(
+            $parseErrors | ForEach-Object {
+                "line $($_.Extent.StartLineNumber), column $($_.Extent.StartColumnNumber): $($_.Message)"
+            }
+        ) -join '; '
+        throw "$Label PowerShell parse failed: $messages"
+    }
+    return $source
 }
 
-$bridge = [IO.File]::ReadAllText($bridgePath)
-$background = [IO.File]::ReadAllText($backgroundPath)
-$manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+$launcher = Read-And-AssertPowerShellUtf8 $bridgePath 'ChatGPT bridge launcher'
+$bridge = Read-And-AssertPowerShellUtf8 $bridgeImplementationPath 'ChatGPT bridge implementation'
+$background = [IO.File]::ReadAllText($backgroundPath, $utf8)
+$manifest = [IO.File]::ReadAllText($manifestPath, $utf8) | ConvertFrom-Json
+
+Assert-Contains $launcher "start-chatgpt-bridge\.impl\.ps1" 'Bridge launcher must load the UTF-8 implementation file.'
+Assert-Contains $launcher "ReadAllText" 'Bridge launcher must explicitly read the implementation source.'
+Assert-Contains $launcher "UTF8Encoding" 'Bridge launcher must explicitly decode the implementation as UTF-8.'
+Assert-Contains $launcher "ScriptBlock\]::Create" 'Bridge launcher must parse the decoded implementation in memory.'
 
 Assert-Contains $bridge "chatgpt-completions" 'Bridge must persist a bounded ChatGPT completion journal.'
 Assert-Contains $bridge "ai-worker-notifier/chatgpt-completion/v1" 'Bridge completion journal schema is missing.'
@@ -74,7 +96,7 @@ if ([string]$manifest.version -ne '0.1.14') {
     throw "Expected ChatGPT watcher extension version 0.1.14, got $($manifest.version)"
 }
 if ([string]$manifest.minimum_chrome_version -ne '116') {
-    throw "Expected minimum Chrome version 116 for WebSocket service-worker lifetime support."
+    throw 'Expected minimum Chrome version 116 for WebSocket service-worker lifetime support.'
 }
 if (@($manifest.permissions) -notcontains 'tabs') {
     throw 'Chrome extension tabs permission is required for exact existing-tab discovery.'
