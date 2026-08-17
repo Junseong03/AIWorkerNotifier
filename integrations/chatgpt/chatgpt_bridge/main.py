@@ -38,6 +38,27 @@ def keepalive_loop(state: BridgeState) -> None:
                 state.clear_socket(peer)
 
 
+def watch_parent(parent_pid: int) -> None:
+    if os.name != "nt" or parent_pid <= 0:
+        return
+    try:
+        import ctypes
+
+        synchronize = 0x00100000
+        infinite = 0xFFFFFFFF
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(synchronize, False, parent_pid)
+        if not handle:
+            os._exit(0)
+        try:
+            kernel32.WaitForSingleObject(handle, infinite)
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        return
+    os._exit(0)
+
+
 def probe_existing_bridge(port: int) -> dict[str, Any] | None:
     try:
         with urllib.request.urlopen(
@@ -79,6 +100,7 @@ def main() -> int:
         description="AIWorkerNotifier ChatGPT localhost bridge"
     )
     parser.add_argument("--port", type=int, default=43127)
+    parser.add_argument("--parent-pid", type=int, default=0)
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
 
@@ -91,6 +113,14 @@ def main() -> int:
         print("Port must be between 1024 and 65535.", file=sys.stderr)
         return 2
 
+    if args.parent_pid > 0:
+        threading.Thread(
+            target=watch_parent,
+            args=(args.parent_pid,),
+            daemon=True,
+            name="chatgpt-bridge-parent-watch",
+        ).start()
+
     repo_root = Path(__file__).resolve().parents[3]
     state = BridgeState(repo_root, args.port)
     state.logger.info(
@@ -98,9 +128,10 @@ def main() -> int:
         args.port,
     )
     state.logger.info(
-        "Bridge implementation: Python %s · PID %s",
+        "Bridge implementation: Python %s · PID %s · parent %s",
         sys.version.split()[0],
         os.getpid(),
+        args.parent_pid or "none",
     )
     state.logger.info(
         "Browser focus/open uses the Chrome extension WebSocket push channel."
