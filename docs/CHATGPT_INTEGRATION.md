@@ -15,12 +15,13 @@ ChatGPT 웹 브라우저에서 **응답 생성이 끝났는지 여부만** 감�
      - 생성 중 여부
      - 완료 signal
   -> Chrome 확장 service worker
-     - 열린 ChatGPT 탭 snapshot
-     - background focus queue poll
+     - 실제 열린 Chrome tab snapshot
+     - background browser-action queue poll
+     - exact existing tab 선택 / 필요 시 새 tab 생성
   -> localhost bridge (127.0.0.1:43127)
      - 체크 해제된 탭만 제외
      - generic completion metadata journal
-     - 기존 탭 focus broker
+     - generic ChatGPT focus-or-open broker
   -> 완료 이벤트를 ai-task-complete로 큐 등록
   -> 기존 inbox / notifier / Discord
 ```
@@ -70,6 +71,8 @@ https://chat.openai.com/*
 
 확장 코드를 업데이트한 뒤에는 `chrome://extensions`에서 확장을 새로고침합니다.
 
+현재 focus-or-open 동작은 extension `0.1.13` 기준입니다.
+
 ## 탭 알림 기본값
 
 탭 선택 모델은 whitelist가 아니라 **disabled list** 방식입니다.
@@ -78,8 +81,6 @@ https://chat.openai.com/*
 - 관리 화면에서 체크 해제: 해당 탭 알림 OFF
 - 다시 체크: 해당 탭 알림 ON
 - 체크 해제 상태 저장: `%LOCALAPPDATA%\AIWorkerNotifier\state\chatgpt-disabled-tabs.json`
-
-이전의 `chatgpt-selected-tabs.json`은 현재 기본 ON 모델의 상태 파일로 사용하지 않습니다.
 
 Chrome 탭이 실제로 닫히거나 ChatGPT URL을 벗어나면 해당 탭 레코드는 제거됩니다. Chrome 확장 탭의 존재 여부는 짧은 heartbeat TTL로 삭제하지 않고 Chrome tab 이벤트와 비파괴 snapshot을 기준으로 유지합니다.
 
@@ -95,15 +96,7 @@ Chrome 탭이 실제로 닫히거나 ChatGPT URL을 벗어나면 해당 탭 레�
 - 턴마다 고유 `turnId`를 생성해 bridge의 dispatch ID에 포함
 - 체크 해제된 탭의 완료 이벤트는 bridge에서 무시
 
-중요하게, **일반 DOM 변경은 완료 신호로 사용하지 않습니다.**
-
-따라서 다음 변화만으로 완료 이벤트를 만들지 않습니다.
-
-- 사용자가 입력창에 글자를 입력함
-- 입력창 커서/레이아웃이 바뀜
-- 기타 Stop 생성 컨트롤과 무관한 DOM 변화
-
-이전의 `assistant` 메시지 컨테이너 개수 증가 fallback은 응답 시작 시점에도 조건이 성립할 수 있어 오탐 원인이 되었으므로 제거했습니다.
+일반 DOM 변경만으로 완료 이벤트를 만들지 않습니다. 입력 문자열과 응답 본문은 읽지 않습니다.
 
 ## Generic completion journal
 
@@ -134,26 +127,68 @@ journal은 최대 최근 500개 파일로 제한합니다. 동일 stable event I
 
 이 journal은 특정 Project 제품에 종속된 저장소가 아닙니다. 외부 local consumer가 완료 metadata를 읽을 수 있게 하는 Adapter seam이며 AIWorkerNotifier는 Project ID, Project 이름, unread count를 저장하거나 계산하지 않습니다.
 
-## Existing-tab focus broker
+## ChatGPT focus-or-open broker
 
-Chrome 확장 `0.1.11`부터 bridge는 local consumer가 **현재 열려 있는 ChatGPT 탭을 새 탭 생성 없이 foreground**할 수 있는 최소 broker를 제공합니다.
+Chrome 확장 `0.1.13`부터 local consumer는 현재 ChatGPT URL을 기준으로 **exact existing tab을 우선 재사용하고, 실제로 없을 때만 새 탭을 하나 여는** generic browser action을 요청할 수 있습니다.
 
-`0.1.12`부터 focus request 전달은 target 페이지의 JavaScript heartbeat에만 의존하지 않습니다. 오래 숨겨진 Chrome 탭은 페이지 `setInterval`이 강하게 throttle될 수 있으므로 extension service worker가 약 2초마다 열린 ChatGPT 탭을 조회하고 기존 heartbeat endpoint를 통해 focus queue를 확인합니다. content watcher heartbeat 경로는 기존 fallback 및 생성 상태 갱신용으로 유지합니다.
+Consumer request:
 
-Flow:
+```json
+{
+  "tabId": "chrome-123",
+  "url": "https://chatgpt.com/c/abc",
+  "openIfMissing": true
+}
+```
+
+중요한 원칙은 Bridge의 `$tabs` cache를 새 탭 생성 판단의 정본으로 사용하지 않는 것입니다.
 
 ```text
-local consumer
-→ POST /api/tabs/focus
-→ Bridge가 현재 tabId 또는 canonical URL로 열린 탭 검색
-→ focus request queue
-→ extension background service worker가 열린 ChatGPT 탭을 주기적으로 확인
-   ↘ target page heartbeat도 동일 queue를 확인하는 fallback으로 유지
-→ focusRequestId 확인
-→ chrome.tabs.update(tabId, { active: true })
-→ chrome.windows.update(windowId, { focused: true })
-→ POST /api/tabs/focus-ack
-→ consumer가 /api/tabs/focus-status polling
+Bridge
+→ request queue
+→ extension background가 chrome.tabs.query({})로 실제 현재 탭 전체 조회
+→ target과 각 tab URL canonicalize
+→ exact match 존재
+   → 새 tab 생성 금지
+   → preferred tabId가 실제 exact match면 우선
+   → 아니면 active/recent existing match 선택
+→ exact match 없음
+   → chrome.tabs.create() 정확히 한 번
+→ 선택/생성 tab active
+→ 최소화 window 복원
+→ chrome.windows.update(windowId, {focused:true})
+→ canonical target URL 포함 focus ack
+```
+
+Canonical 비교는 다음을 통합합니다.
+
+- `chat.openai.com` / `www.chatgpt.com` → `chatgpt.com`
+- query / fragment 제거
+- trailing slash 정규화
+- path 보존
+
+같은 exact URL 탭이 이미 여러 개 있어도 새 탭을 추가하지 않습니다. 빠른 연속 요청에서도 첫 요청이 탭을 생성한 뒤 다음 actual query가 그 exact match를 보기 때문에 불필요한 중복 생성을 피합니다.
+
+`tabId`는 preference hint입니다. 해당 ID가 실제로 target URL과 일치하지 않으면 버리고 다른 exact match를 사용합니다.
+
+### Foreground 의미
+
+`chrome.tabs.update(..., {active:true})`로 tab을 선택한 뒤 `chrome.windows.update(..., {focused:true})`로 Chrome window 자체를 foreground합니다. 최소화된 window는 먼저 normal 상태로 복원합니다.
+
+기존 normal Chrome window가 없고 새 세션을 열어야 하는 경우에는 target URL을 가진 normal Chrome window를 새로 만들 수 있습니다.
+
+### Delivery hardening
+
+`0.1.11`은 target page heartbeat에 focus request 전달을 의존해 오래 숨겨진 페이지에서 timeout 가능성이 있었습니다.
+
+`0.1.12`부터 background poll을 추가했고, `0.1.13`은 약 1초 간격 actual-tab snapshot 경로에서 focus-or-open request를 확인합니다. content watcher heartbeat는 생성 상태와 기존 fallback 경로로 남깁니다.
+
+지원 endpoint:
+
+```text
+POST /api/tabs/focus
+POST /api/tabs/focus-status
+POST /api/tabs/focus-ack   # extension 전용
 ```
 
 Consumer marker:
@@ -162,26 +197,7 @@ Consumer marker:
 X-AIWorkerNotifier-Client: flowduck-adapter
 ```
 
-지원 endpoint:
-
-```text
-POST /api/tabs/focus
-POST /api/tabs/focus-status
-```
-
-Extension 전용 ack:
-
-```text
-POST /api/tabs/focus-ack
-```
-
-Focus target 선택 순서:
-
-1. 요청한 `tabId`가 아직 열려 있으면 해당 탭
-2. stale tabId라면 canonical ChatGPT URL이 일치하는 현재 열린 탭
-3. 찾지 못하면 `TAB_NOT_FOUND`
-
-Broker는 임의 URL을 새로 열지 않습니다. 탭이 없거나 Chrome focus acknowledgement가 실패/timeout되면 실패 상태만 반환합니다.
+Broker는 ChatGPT canonical URL만 다루며 Project ID나 unread 의미를 알지 않습니다.
 
 ## 개인정보 및 데이터 경계
 
@@ -209,15 +225,13 @@ Chrome watcher와 bridge가 사용하는 정보는 다음 범위로 제한합니
 
 - `127.0.0.1`에만 바인딩
 - 브라우저 API는 고정 client marker 요구
-- 외부 consumer focus API는 별도 `flowduck-adapter` marker 요구
-- ChatGPT가 아닌 URL은 탭 등록 거부
+- 외부 consumer browser action API는 별도 `flowduck-adapter` marker 요구
+- ChatGPT가 아닌 URL은 등록 및 focus-or-open 대상에서 거부
 - snapshot 누락만으로 열린 Chrome 탭을 삭제하지 않음
-- focus broker는 현재 bridge가 알고 있는 ChatGPT 탭만 대상으로 함
-- background focus poll도 기존 loopback heartbeat endpoint와 tab metadata 범위만 사용
+- 새 탭 생성 여부는 stale bridge cache가 아니라 actual Chrome query로 결정
+- Project mapping/unread 상태는 저장하지 않음
 - 응답 내용과 프롬프트는 bridge로 보내지 않음
 - Discord Webhook secret은 기존 DPAPI 저장소에만 유지
-
-탭 제목은 사용자가 어떤 대화인지 구분하기 위한 표시와 Discord 완료 이벤트의 Task 이름에 사용합니다.
 
 ## 레거시 userscript
 
