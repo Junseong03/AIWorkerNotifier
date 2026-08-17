@@ -27,7 +27,7 @@ else {
 
 Push-Location $PSScriptRoot
 try {
-    & $pythonExe @pythonPrefixArgs -m chatgpt_bridge.main --port $Port
+    & $pythonExe @pythonPrefixArgs -m chatgpt_bridge.main --port $Port --parent-pid $PID
     $exitCode = $LASTEXITCODE
 }
 finally {
