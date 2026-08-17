@@ -14,6 +14,18 @@ function Assert-Contains {
     if ($Text -notmatch $Pattern) { throw $Message }
 }
 
+$parseTokens = $null
+$parseErrors = $null
+[void][System.Management.Automation.Language.Parser]::ParseFile(
+    $bridgePath,
+    [ref]$parseTokens,
+    [ref]$parseErrors
+)
+if (@($parseErrors).Count -gt 0) {
+    $messages = @($parseErrors | ForEach-Object { $_.Message }) -join '; '
+    throw "ChatGPT bridge PowerShell parse failed: $messages"
+}
+
 $bridge = [IO.File]::ReadAllText($bridgePath)
 $background = [IO.File]::ReadAllText($backgroundPath)
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
