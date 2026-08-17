@@ -92,6 +92,7 @@ $pythonFiles = @(
     'persistence.py',
     'state.py',
     'server.py',
+    'selftest.py',
     'main.py',
     '__init__.py'
 )
@@ -117,11 +118,14 @@ Assert-Contains $pythonSource 'chatgpt-bridge\.log' 'Bridge must persist bounded
 Assert-Contains $pythonSource 'COMPLETION_JOURNAL_LIMIT = 500' 'Completion journal retention must remain bounded.'
 Assert-Contains $pythonSource 'FOCUS_KEEPALIVE_SECONDS = 20' 'WebSocket keepalive must remain inside the MV3 idle window.'
 Assert-Contains $pythonSource '127\.0\.0\.1' 'Bridge must bind/probe loopback only.'
+Assert-Contains $pythonSource '101 Switching Protocols' 'Python self-test must exercise a real WebSocket upgrade.'
+Assert-Contains $pythonSource 'focus-status' 'Python self-test must verify focus acknowledgement state.'
 
 $python = Resolve-BridgePython
+$prefixArgs = @($python.Prefix)
 Push-Location $chatGptRoot
 try {
-    & $python.Exe @($python.Prefix) -B -m chatgpt_bridge.main --self-test
+    & $python.Exe @prefixArgs -B -m chatgpt_bridge.main --self-test
     if ($LASTEXITCODE -ne 0) {
         throw "Python ChatGPT bridge self-test failed with exit $LASTEXITCODE."
     }
