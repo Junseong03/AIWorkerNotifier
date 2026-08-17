@@ -17,4 +17,4 @@ $source = [IO.File]::ReadAllText($implementationPath, $utf8)
 $bridgeSourceRoot = $PSScriptRoot
 $source = $source.Replace('$PSScriptRoot', '$bridgeSourceRoot')
 $scriptBlock = [ScriptBlock]::Create($source)
-& $scriptBlock -Port $Port
+. $scriptBlock -Port $Port
