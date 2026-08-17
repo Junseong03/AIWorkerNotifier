@@ -17,14 +17,20 @@ $aiTaskComplete = Join-Path $repoRoot 'bin\ai-task-complete.internal.ps1'
 $runtimeRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'AIWorkerNotifier'
 $stateRoot = Join-Path $runtimeRoot 'state'
 $disabledTabsPath = Join-Path $stateRoot 'chatgpt-disabled-tabs.json'
+$completionJournalRoot = Join-Path $stateRoot 'chatgpt-completions'
 $legacyTabTtlSeconds = 30
+$completionJournalLimit = 500
+$focusRequestTtlSeconds = 15
 $tabs = @{}
 $disabledTabs = @{}
+$focusRequestsByTab = @{}
+$focusStatusById = @{}
 
 if (-not (Test-Path -LiteralPath $aiTaskComplete)) {
     throw "ai-task-complete 진입점을 찾을 수 없습니다: $aiTaskComplete"
 }
 New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
+New-Item -ItemType Directory -Force -Path $completionJournalRoot | Out-Null
 
 function Limit-Text {
     param([AllowNull()][string]$Value, [int]$MaxLength)
@@ -77,13 +83,49 @@ function Remove-StaleLegacyTabs {
     if ($disabledChanged) { Save-DisabledTabs }
 }
 
+function Remove-StaleFocusRequests {
+    $cutoff = [DateTime]::UtcNow.AddSeconds(-1 * $focusRequestTtlSeconds)
+    foreach ($requestId in @($focusStatusById.Keys)) {
+        $status = $focusStatusById[$requestId]
+        if ($status.CreatedAtUtc -lt $cutoff) {
+            if ($status.Status -eq 'pending') {
+                $status.Status = 'timeout'
+                $status.Error = 'Chrome tab focus acknowledgement timed out.'
+            }
+        }
+    }
+
+    foreach ($tabId in @($focusRequestsByTab.Keys)) {
+        $requestId = [string]$focusRequestsByTab[$tabId]
+        if (-not $focusStatusById.ContainsKey($requestId) -or $focusStatusById[$requestId].Status -ne 'pending') {
+            $focusRequestsByTab.Remove($tabId)
+        }
+    }
+}
+
 function Test-ChatGptUrl {
     param([string]$Url)
     try {
         $uri = [Uri]$Url
-        return $uri.Scheme -eq 'https' -and @('chatgpt.com', 'chat.openai.com') -contains $uri.Host
+        return $uri.Scheme -eq 'https' -and @('chatgpt.com', 'www.chatgpt.com', 'chat.openai.com') -contains $uri.Host.ToLowerInvariant()
     }
     catch { return $false }
+}
+
+function Get-CanonicalChatGptUrl {
+    param([string]$Url)
+    try {
+        $uri = [Uri]$Url
+        $host = $uri.Host.ToLowerInvariant()
+        if ($uri.Scheme -ne 'https' -or @('chatgpt.com', 'www.chatgpt.com', 'chat.openai.com') -notcontains $host) {
+            return ''
+        }
+        if ($host -eq 'www.chatgpt.com' -or $host -eq 'chat.openai.com') { $host = 'chatgpt.com' }
+        $path = $uri.AbsolutePath
+        if ($path.Length -gt 1) { $path = $path.TrimEnd('/') }
+        return "https://$host$path"
+    }
+    catch { return '' }
 }
 
 function HtmlEncode {
@@ -96,6 +138,7 @@ function Upsert-ChromeTab {
         [string]$Id,
         [string]$Title,
         [string]$Url,
+        [Nullable[int]]$WindowId = $null,
         [Nullable[bool]]$Generating = $null
     )
 
@@ -108,15 +151,17 @@ function Upsert-ChromeTab {
     if (-not (Test-ChatGptUrl $urlValue)) { return }
 
     $generatingValue = $false
+    $windowIdValue = $null
     if ($tabs.ContainsKey($idValue)) {
         $generatingValue = [bool]$tabs[$idValue].Generating
+        $windowIdValue = $tabs[$idValue].WindowId
     }
-    if ($null -ne $Generating) {
-        $generatingValue = [bool]$Generating
-    }
+    if ($null -ne $Generating) { $generatingValue = [bool]$Generating }
+    if ($null -ne $WindowId) { $windowIdValue = [int]$WindowId }
 
     $tabs[$idValue] = [pscustomobject]@{
         TabId = $idValue
+        WindowId = $windowIdValue
         Title = $titleValue
         Url = $urlValue
         Generating = $generatingValue
@@ -131,8 +176,11 @@ function Apply-ChromeTabSnapshot {
     # 불완전하거나 빈 snapshot 하나가 열린 탭을 지우는 일이 없도록 여기서는 삭제하지 않는다.
     foreach ($item in @($SnapshotTabs)) {
         if ($null -eq $item) { continue }
+        $windowId = $null
+        if ($null -ne $item.windowId) { $windowId = [int]$item.windowId }
         Upsert-ChromeTab `
             -Id ([string]$item.tabId) `
+            -WindowId $windowId `
             -Title ([string]$item.title) `
             -Url ([string]$item.url)
     }
@@ -145,8 +193,14 @@ function Remove-ChromeTab {
     if ([string]::IsNullOrWhiteSpace($idValue)) { return }
     if ($idValue -notlike 'chrome-*') { return }
 
-    if ($tabs.ContainsKey($idValue)) {
-        $tabs.Remove($idValue)
+    if ($tabs.ContainsKey($idValue)) { $tabs.Remove($idValue) }
+    if ($focusRequestsByTab.ContainsKey($idValue)) {
+        $requestId = [string]$focusRequestsByTab[$idValue]
+        if ($focusStatusById.ContainsKey($requestId)) {
+            $focusStatusById[$requestId].Status = 'failed'
+            $focusStatusById[$requestId].Error = 'Chrome tab was closed before focus.'
+        }
+        $focusRequestsByTab.Remove($idValue)
     }
     if ($disabledTabs.ContainsKey($idValue)) {
         $disabledTabs.Remove($idValue)
@@ -159,7 +213,6 @@ function Get-ManagementHtml {
     $rows = New-Object Collections.Generic.List[string]
 
     foreach ($tab in @($tabs.Values | Sort-Object Title, Url)) {
-        # 새로 감지된 탭은 기본 ON. 사용자가 명시적으로 체크 해제한 탭만 disabledTabs에 저장한다.
         $checked = if (-not $disabledTabs.ContainsKey($tab.TabId)) { ' checked' } else { '' }
         $state = if ($tab.Generating) { '응답 생성 중' } else { '대기 중' }
         $shortId = if ($tab.TabId.Length -gt 12) { $tab.TabId.Substring(0, 12) } else { $tab.TabId }
@@ -222,9 +275,7 @@ function Write-HttpResponse {
     $headers.Add('Cache-Control: no-store')
     $headers.Add("Content-Type: $ContentType")
     $headers.Add("Content-Length: $($bodyBytes.Length)")
-    foreach ($entry in $ExtraHeaders.GetEnumerator()) {
-        $headers.Add("$($entry.Key): $($entry.Value)")
-    }
+    foreach ($entry in $ExtraHeaders.GetEnumerator()) { $headers.Add("$($entry.Key): $($entry.Value)") }
     $headers.Add('')
     $headers.Add('')
 
@@ -237,9 +288,6 @@ function Write-HttpResponse {
 function Read-HttpRequest {
     param([IO.Stream]$Stream)
 
-    # HTTP Content-Length는 문자 수가 아니라 바이트 수다.
-    # StreamReader로 UTF-8 문자를 Content-Length개 읽으면 한국어 제목이 포함된 JSON에서
-    # body 경계가 틀어질 수 있으므로, 헤더와 body를 모두 원시 바이트 기준으로 읽는다.
     $maxHeaderBytes = 32768
     $headerBytes = New-Object Collections.Generic.List[byte]
 
@@ -256,9 +304,7 @@ function Read-HttpRequest {
                 $headerBytes[$n - 3] -eq 10 -and
                 $headerBytes[$n - 2] -eq 13 -and
                 $headerBytes[$n - 1] -eq 10
-            ) {
-                break
-            }
+            ) { break }
         }
     }
 
@@ -283,9 +329,7 @@ function Read-HttpRequest {
             throw 'invalid Content-Length'
         }
     }
-    if ($contentLength -lt 0 -or $contentLength -gt 65536) {
-        throw 'request body too large'
-    }
+    if ($contentLength -lt 0 -or $contentLength -gt 65536) { throw 'request body too large' }
 
     $bodyBytes = New-Object byte[] $contentLength
     $offset = 0
@@ -307,6 +351,65 @@ function Parse-JsonBody {
     param([string]$Body)
     try { return $Body | ConvertFrom-Json }
     catch { throw 'invalid JSON body' }
+}
+
+function Get-EventFileName {
+    param([string]$EventId)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = $utf8.GetBytes($EventId)
+        return (([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant() + '.json')
+    }
+    finally {
+        $sha.Dispose()
+    }
+}
+
+function Write-CompletionJournal {
+    param($Tab, $Data)
+
+    $turnId = Limit-Text ([string]$Data.turnId) 80
+    $detectedAt = Limit-Text ([string]$Data.detectedAtUtc) 80
+    if ([string]::IsNullOrWhiteSpace($detectedAt)) { $detectedAt = [DateTime]::UtcNow.ToString('o') }
+    $eventId = if ([string]::IsNullOrWhiteSpace($turnId)) {
+        "{0}:{1}" -f $Tab.TabId, $detectedAt
+    }
+    else {
+        "{0}:{1}" -f $Tab.TabId, $turnId
+    }
+
+    $windowId = $null
+    if ($null -ne $Tab.WindowId) { $windowId = [int]$Tab.WindowId }
+    $event = [ordered]@{
+        schema = 'ai-worker-notifier/chatgpt-completion/v1'
+        eventId = $eventId
+        tabId = [string]$Tab.TabId
+        windowId = $windowId
+        title = Limit-Text ([string]$Tab.Title) 200
+        url = Limit-Text ([string]$Tab.Url) 2048
+        turnId = $turnId
+        detectedAtUtc = $detectedAt
+        detectionMode = Limit-Text ([string]$Data.detectionMode) 80
+    }
+
+    $fileName = Get-EventFileName $eventId
+    $finalPath = Join-Path $completionJournalRoot $fileName
+    if (Test-Path -LiteralPath $finalPath) { return }
+
+    $tempPath = "$finalPath.tmp-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $json = $event | ConvertTo-Json -Depth 4
+        [IO.File]::WriteAllText($tempPath, $json, $utf8)
+        Move-Item -LiteralPath $tempPath -Destination $finalPath -Force
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempPath) { Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue }
+    }
+
+    $oldFiles = @(Get-ChildItem -LiteralPath $completionJournalRoot -Filter '*.json' -File -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTimeUtc -Descending |
+        Select-Object -Skip $completionJournalLimit)
+    foreach ($file in $oldFiles) { Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue }
 }
 
 function Queue-ChatGptCompletion {
@@ -335,6 +438,64 @@ function Queue-ChatGptCompletion {
         -Outcome 'success' `
         -Project 'ChatGPT' `
         -DispatchId $dispatchId
+}
+
+function Find-FocusTab {
+    param([string]$TabId, [string]$Url)
+
+    $idValue = Limit-Text $TabId 100
+    if (-not [string]::IsNullOrWhiteSpace($idValue) -and $tabs.ContainsKey($idValue)) {
+        return $tabs[$idValue]
+    }
+
+    $canonical = Get-CanonicalChatGptUrl $Url
+    if ([string]::IsNullOrWhiteSpace($canonical)) { return $null }
+    $matches = @($tabs.Values | Where-Object { (Get-CanonicalChatGptUrl ([string]$_.Url)) -eq $canonical } | Sort-Object LastSeenUtc -Descending)
+    if ($matches.Count -eq 0) { return $null }
+    return $matches[0]
+}
+
+function Queue-FocusRequest {
+    param([string]$TabId, [string]$Url)
+
+    Remove-StaleFocusRequests
+    $tab = Find-FocusTab -TabId $TabId -Url $Url
+    if ($null -eq $tab) { return $null }
+
+    $requestId = [Guid]::NewGuid().ToString()
+    $status = [pscustomobject]@{
+        RequestId = $requestId
+        TabId = [string]$tab.TabId
+        Status = 'pending'
+        Error = ''
+        CreatedAtUtc = [DateTime]::UtcNow
+    }
+    $focusStatusById[$requestId] = $status
+    $focusRequestsByTab[[string]$tab.TabId] = $requestId
+    return $status
+}
+
+function Complete-FocusRequest {
+    param([string]$RequestId, [string]$TabId, [bool]$Success, [string]$Error)
+
+    $idValue = Limit-Text $RequestId 100
+    $tabIdValue = Limit-Text $TabId 100
+    if (-not $focusStatusById.ContainsKey($idValue)) { return $false }
+    $status = $focusStatusById[$idValue]
+    if ([string]$status.TabId -ne $tabIdValue) { return $false }
+
+    if ($Success) {
+        $status.Status = 'focused'
+        $status.Error = ''
+    }
+    else {
+        $status.Status = 'failed'
+        $status.Error = Limit-Text $Error 300
+    }
+    if ($focusRequestsByTab.ContainsKey($tabIdValue) -and [string]$focusRequestsByTab[$tabIdValue] -eq $idValue) {
+        $focusRequestsByTab.Remove($tabIdValue)
+    }
+    return $true
 }
 
 $disabledTabs = Load-DisabledTabs
@@ -383,14 +544,48 @@ try {
 
                 $newDisabledTabs = @{}
                 foreach ($id in @($tabs.Keys)) {
-                    if (-not $enabledTabs.ContainsKey($id)) {
-                        $newDisabledTabs[$id] = $true
-                    }
+                    if (-not $enabledTabs.ContainsKey($id)) { $newDisabledTabs[$id] = $true }
                 }
                 $disabledTabs = $newDisabledTabs
                 Save-DisabledTabs
 
                 Write-HttpResponse $stream 303 'See Other' '' 'text/plain; charset=utf-8' @{ Location = '/' }
+                continue
+            }
+
+            if ($clientMarker -eq 'flowduck-adapter') {
+                if ($method -eq 'POST' -and $target -eq '/api/tabs/focus') {
+                    $data = Parse-JsonBody $body
+                    $status = Queue-FocusRequest -TabId ([string]$data.tabId) -Url ([string]$data.url)
+                    if ($null -eq $status) {
+                        Write-HttpResponse $stream 404 'Not Found' '{"code":"TAB_NOT_FOUND"}' 'application/json; charset=utf-8'
+                        continue
+                    }
+                    $response = @{ requestId = $status.RequestId; tabId = $status.TabId; status = $status.Status } | ConvertTo-Json -Compress
+                    Write-HttpResponse $stream 202 'Accepted' $response 'application/json; charset=utf-8'
+                    continue
+                }
+
+                if ($method -eq 'POST' -and $target -eq '/api/tabs/focus-status') {
+                    Remove-StaleFocusRequests
+                    $data = Parse-JsonBody $body
+                    $requestId = Limit-Text ([string]$data.requestId) 100
+                    if (-not $focusStatusById.ContainsKey($requestId)) {
+                        Write-HttpResponse $stream 404 'Not Found' '{"code":"FOCUS_REQUEST_NOT_FOUND"}' 'application/json; charset=utf-8'
+                        continue
+                    }
+                    $status = $focusStatusById[$requestId]
+                    $response = @{
+                        requestId = $status.RequestId
+                        tabId = $status.TabId
+                        status = $status.Status
+                        error = $status.Error
+                    } | ConvertTo-Json -Compress
+                    Write-HttpResponse $stream 200 'OK' $response 'application/json; charset=utf-8'
+                    continue
+                }
+
+                Write-HttpResponse $stream 404 'Not Found'
                 continue
             }
 
@@ -414,10 +609,13 @@ try {
             }
 
             if ($method -eq 'POST' -and $target -eq '/api/tabs/heartbeat') {
+                Remove-StaleFocusRequests
                 $data = Parse-JsonBody $body
                 $id = Limit-Text ([string]$data.tabId) 100
                 $title = Limit-Text ([string]$data.title) 200
                 $url = Limit-Text ([string]$data.url) 2048
+                $windowId = $null
+                if ($null -ne $data.windowId) { $windowId = [int]$data.windowId }
 
                 if ([string]::IsNullOrWhiteSpace($id) -or -not (Test-ChatGptUrl $url)) {
                     Write-HttpResponse $stream 400 'Bad Request'
@@ -425,11 +623,12 @@ try {
                 }
 
                 if ($id -like 'chrome-*') {
-                    Upsert-ChromeTab -Id $id -Title $title -Url $url -Generating ([bool]$data.generating)
+                    Upsert-ChromeTab -Id $id -WindowId $windowId -Title $title -Url $url -Generating ([bool]$data.generating)
                 }
                 else {
                     $tabs[$id] = [pscustomobject]@{
                         TabId = $id
+                        WindowId = $windowId
                         Title = $title
                         Url = $url
                         Generating = ([bool]$data.generating)
@@ -437,15 +636,41 @@ try {
                     }
                 }
 
-                $response = @{ selected = (-not $disabledTabs.ContainsKey($id)) } | ConvertTo-Json -Compress
+                $focusRequestId = ''
+                if ($focusRequestsByTab.ContainsKey($id)) { $focusRequestId = [string]$focusRequestsByTab[$id] }
+                $response = @{
+                    selected = (-not $disabledTabs.ContainsKey($id))
+                    focusRequestId = $focusRequestId
+                } | ConvertTo-Json -Compress
                 Write-HttpResponse $stream 200 'OK' $response 'application/json; charset=utf-8'
+                continue
+            }
+
+            if ($method -eq 'POST' -and $target -eq '/api/tabs/focus-ack') {
+                $data = Parse-JsonBody $body
+                $accepted = Complete-FocusRequest `
+                    -RequestId ([string]$data.requestId) `
+                    -TabId ([string]$data.tabId) `
+                    -Success ([bool]$data.success) `
+                    -Error ([string]$data.error)
+                if (-not $accepted) {
+                    Write-HttpResponse $stream 404 'Not Found'
+                    continue
+                }
+                Write-HttpResponse $stream 204 'No Content'
                 continue
             }
 
             if ($method -eq 'POST' -and $target -eq '/api/tabs/completed') {
                 $data = Parse-JsonBody $body
                 $id = Limit-Text ([string]$data.tabId) 100
-                $turnId = Limit-Text ([string]$data.turnId) 80
+                $windowId = $null
+                if ($null -ne $data.windowId) { $windowId = [int]$data.windowId }
+                Upsert-ChromeTab `
+                    -Id $id `
+                    -WindowId $windowId `
+                    -Title ([string]$data.title) `
+                    -Url ([string]$data.url)
 
                 if (-not $tabs.ContainsKey($id) -or $disabledTabs.ContainsKey($id)) {
                     Write-HttpResponse $stream 204 'No Content'
@@ -453,7 +678,8 @@ try {
                 }
 
                 $tab = $tabs[$id]
-                Queue-ChatGptCompletion -Tab $tab -TurnId $turnId
+                Write-CompletionJournal -Tab $tab -Data $data
+                Queue-ChatGptCompletion -Tab $tab -TurnId (Limit-Text ([string]$data.turnId) 80)
                 Write-HttpResponse $stream 204 'No Content'
                 Write-Host ("[{0}] 활성 탭 완료 알림 큐 등록: {1}" -f (Get-Date -Format 'HH:mm:ss'), $tab.Title)
                 continue
