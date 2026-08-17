@@ -14,8 +14,10 @@ let syncInFlight = false;
 let lastSnapshotAt = 0;
 let focusSocket = null;
 let focusSocketReconnectTimer = null;
+let browserActionChain = Promise.resolve();
 const generatingByTab = new Map();
 const focusRequestsInFlight = new Set();
+const queuedFocusRequestIds = new Set();
 
 async function postJson(url, payload) {
   try {
@@ -270,6 +272,28 @@ async function applyBrowserFocusAction(action, allTabs) {
   }
 }
 
+function enqueueBrowserFocusAction(action) {
+  if (!action?.requestId || queuedFocusRequestIds.has(action.requestId)) {
+    return Promise.resolve();
+  }
+  queuedFocusRequestIds.add(action.requestId);
+
+  const task = browserActionChain
+    .then(async () => {
+      // The existence check and optional create must be one serialized critical
+      // section. A later request re-queries Chrome only after the previous
+      // request has focused/created its target, preventing duplicate new tabs.
+      const allTabs = await chrome.tabs.query({});
+      await applyBrowserFocusAction(action, allTabs);
+    })
+    .finally(() => {
+      queuedFocusRequestIds.delete(action.requestId);
+    });
+
+  browserActionChain = task.catch(() => {});
+  return task;
+}
+
 function scheduleFocusSocketReconnect() {
   if (focusSocketReconnectTimer !== null) return;
   focusSocketReconnectTimer = setTimeout(() => {
@@ -317,9 +341,7 @@ function ensureFocusSocket() {
     if (payload?.type !== 'focus-or-open') return;
     const action = toBrowserFocusAction(payload);
     if (!action) return;
-    chrome.tabs.query({})
-      .then((allTabs) => applyBrowserFocusAction(action, allTabs))
-      .catch(() => {});
+    enqueueBrowserFocusAction(action).catch(() => {});
   };
 
   socket.onerror = () => {};
@@ -361,7 +383,7 @@ async function syncOpenChatGptTabs({ force = false, inject = false } = {}) {
     // is pushed over the persistent localhost WebSocket channel.
     const focusAction = await readBrowserFocusAction(response);
     if (focusAction) {
-      await applyBrowserFocusAction(focusAction, allTabs);
+      await enqueueBrowserFocusAction(focusAction);
     }
 
     if (inject) {
