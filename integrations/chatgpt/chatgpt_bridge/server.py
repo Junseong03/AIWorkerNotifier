@@ -413,6 +413,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
             pass
         finally:
             self.state.clear_socket(peer)
+            # The upgraded WebSocket owns the connection. Once it closes, do not
+            # let BaseHTTPRequestHandler parse another HTTP request from the
+            # already-shutdown socket; that only produces a noisy BrokenPipeError.
+            self.close_connection = True
 
     def _read_ws_frame(self) -> tuple[int, bytes] | None:
         first = self.rfile.read(2)
