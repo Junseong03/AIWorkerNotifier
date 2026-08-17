@@ -1,9 +1,12 @@
 (() => {
   const WATCHER_KEY = '__AI_WORKER_NOTIFIER_CHATGPT_WATCHER_V2__';
-  const WATCHER_VERSION = '0.1.10';
+  const WATCHER_VERSION = '0.1.15';
   const existing = window[WATCHER_KEY];
 
-  if (existing?.version === WATCHER_VERSION && existing?.active === true) return;
+  // Re-injection must always replace an older watcher. An unpacked-extension
+  // reload invalidates the old chrome.runtime context while the page itself can
+  // stay alive, so version equality is not sufficient to prove that the old
+  // watcher can still send extension messages.
   try { existing?.stop?.(); } catch (_) {}
 
   const watcherState = { version: WATCHER_VERSION, active: true, stop: null };
@@ -49,8 +52,22 @@
   let checkIntervalId = null;
   let heartbeatIntervalId = null;
 
+  function extensionRuntimeAvailable() {
+    try {
+      return typeof chrome !== 'undefined' &&
+        chrome !== null &&
+        chrome.runtime !== undefined &&
+        typeof chrome.runtime.sendMessage === 'function';
+    } catch (_) {
+      return false;
+    }
+  }
+
   function isExtensionContextInvalid(error) {
-    return String(error?.message || error || '').includes('Extension context invalidated');
+    const message = String(error?.message || error || '');
+    return message.includes('Extension context invalidated') ||
+      message.includes("Cannot read properties of undefined (reading 'sendMessage')") ||
+      message.includes('Cannot access a chrome-extension:// URL of different extension');
   }
 
   function stopWatcher() {
@@ -74,22 +91,34 @@
 
   function safeSendMessage(message, callback) {
     if (stopped) return false;
+    if (!extensionRuntimeAvailable()) {
+      console.info('[AIWorkerNotifier] extension context is unavailable; stopping stale watcher.');
+      stopWatcher();
+      return false;
+    }
+
     try {
       chrome.runtime.sendMessage(message, (response) => {
         if (stopped) return;
         try {
+          if (!extensionRuntimeAvailable()) {
+            stopWatcher();
+            return;
+          }
           if (chrome.runtime.lastError) {
             if (isExtensionContextInvalid(chrome.runtime.lastError)) stopWatcher();
             return;
           }
           callback?.(response);
         } catch (error) {
-          if (isExtensionContextInvalid(error)) stopWatcher();
+          if (isExtensionContextInvalid(error) || !extensionRuntimeAvailable()) {
+            stopWatcher();
+          }
         }
       });
       return true;
     } catch (error) {
-      if (isExtensionContextInvalid(error)) {
+      if (isExtensionContextInvalid(error) || !extensionRuntimeAvailable()) {
         stopWatcher();
         return false;
       }
