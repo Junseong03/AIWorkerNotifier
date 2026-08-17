@@ -17,6 +17,10 @@ config.json
 # PowerShell temporary files
 *.tmp
 
+# Python cache
+__pycache__/
+*.py[cod]
+
 # Windows
 Thumbs.db
 Desktop.ini
