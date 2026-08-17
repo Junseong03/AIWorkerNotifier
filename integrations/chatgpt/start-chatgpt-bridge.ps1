@@ -177,7 +177,9 @@ function Apply-ChromeTabSnapshot {
     foreach ($item in @($SnapshotTabs)) {
         if ($null -eq $item) { continue }
         $windowId = $null
-        if ($null -ne $item.windowId) { $windowId = [int]$item.windowId }
+        if ($item.PSObject.Properties.Name -contains 'windowId' -and $null -ne $item.windowId) {
+            $windowId = [int]$item.windowId
+        }
         Upsert-ChromeTab `
             -Id ([string]$item.tabId) `
             -WindowId $windowId `
@@ -443,12 +445,18 @@ function Queue-ChatGptCompletion {
 function Find-FocusTab {
     param([string]$TabId, [string]$Url)
 
+    $canonical = Get-CanonicalChatGptUrl $Url
     $idValue = Limit-Text $TabId 100
     if (-not [string]::IsNullOrWhiteSpace($idValue) -and $tabs.ContainsKey($idValue)) {
-        return $tabs[$idValue]
+        $candidate = $tabs[$idValue]
+        if (
+            [string]::IsNullOrWhiteSpace($canonical) -or
+            (Get-CanonicalChatGptUrl ([string]$candidate.Url)) -eq $canonical
+        ) {
+            return $candidate
+        }
     }
 
-    $canonical = Get-CanonicalChatGptUrl $Url
     if ([string]::IsNullOrWhiteSpace($canonical)) { return $null }
     $matches = @($tabs.Values | Where-Object { (Get-CanonicalChatGptUrl ([string]$_.Url)) -eq $canonical } | Sort-Object LastSeenUtc -Descending)
     if ($matches.Count -eq 0) { return $null }
@@ -456,33 +464,82 @@ function Find-FocusTab {
 }
 
 function Queue-FocusRequest {
-    param([string]$TabId, [string]$Url)
+    param(
+        [string]$TabId,
+        [string]$Url,
+        [bool]$OpenIfMissing = $false
+    )
 
     Remove-StaleFocusRequests
-    $tab = Find-FocusTab -TabId $TabId -Url $Url
-    if ($null -eq $tab) { return $null }
+    $canonical = Get-CanonicalChatGptUrl $Url
+    if ([string]::IsNullOrWhiteSpace($canonical)) { return $null }
+
+    $tab = Find-FocusTab -TabId $TabId -Url $canonical
+    if ($null -eq $tab -and -not $OpenIfMissing) { return $null }
+
+    $preferredTabId = if ($null -ne $tab) {
+        [string]$tab.TabId
+    }
+    else {
+        Limit-Text $TabId 100
+    }
 
     $requestId = [Guid]::NewGuid().ToString()
     $status = [pscustomobject]@{
         RequestId = $requestId
-        TabId = [string]$tab.TabId
+        TabId = $preferredTabId
+        TargetUrl = $canonical
+        OpenIfMissing = $OpenIfMissing
         Status = 'pending'
         Error = ''
         CreatedAtUtc = [DateTime]::UtcNow
     }
     $focusStatusById[$requestId] = $status
-    $focusRequestsByTab[[string]$tab.TabId] = $requestId
+
+    # openIfMissing 요청은 실제 전체 Chrome tab query가 최종 판정한다.
+    # 캐시된 tabId heartbeat로 먼저 처리하면 stale snapshot이 새 동작을 우회할 수 있으므로
+    # 기존 focus-only 요청만 tab heartbeat fallback map에 넣는다.
+    if (-not $OpenIfMissing -and $null -ne $tab) {
+        $focusRequestsByTab[[string]$tab.TabId] = $requestId
+    }
     return $status
 }
 
+function Get-PendingOpenFocusRequest {
+    Remove-StaleFocusRequests
+    $pending = @(
+        $focusStatusById.Values |
+            Where-Object { $_.Status -eq 'pending' -and $_.OpenIfMissing -eq $true } |
+            Sort-Object CreatedAtUtc
+    )
+    if ($pending.Count -eq 0) { return $null }
+    return $pending[0]
+}
+
 function Complete-FocusRequest {
-    param([string]$RequestId, [string]$TabId, [bool]$Success, [string]$Error)
+    param(
+        [string]$RequestId,
+        [string]$TabId,
+        [string]$Url,
+        [bool]$Success,
+        [string]$Error
+    )
 
     $idValue = Limit-Text $RequestId 100
     $tabIdValue = Limit-Text $TabId 100
+    $ackUrl = Get-CanonicalChatGptUrl $Url
     if (-not $focusStatusById.ContainsKey($idValue)) { return $false }
     $status = $focusStatusById[$idValue]
-    if ([string]$status.TabId -ne $tabIdValue) { return $false }
+    if ($status.Status -ne 'pending') { return $false }
+
+    if ($status.OpenIfMissing -eq $true) {
+        if ($ackUrl -ne [string]$status.TargetUrl) { return $false }
+        if ($Success -and $tabIdValue -notlike 'chrome-*') { return $false }
+        if ($Success) { $status.TabId = $tabIdValue }
+    }
+    elseif ([string]$status.TabId -ne $tabIdValue) {
+        return $false
+    }
 
     if ($Success) {
         $status.Status = 'focused'
@@ -492,8 +549,11 @@ function Complete-FocusRequest {
         $status.Status = 'failed'
         $status.Error = Limit-Text $Error 300
     }
-    if ($focusRequestsByTab.ContainsKey($tabIdValue) -and [string]$focusRequestsByTab[$tabIdValue] -eq $idValue) {
-        $focusRequestsByTab.Remove($tabIdValue)
+
+    foreach ($mappedTabId in @($focusRequestsByTab.Keys)) {
+        if ([string]$focusRequestsByTab[$mappedTabId] -eq $idValue) {
+            $focusRequestsByTab.Remove($mappedTabId)
+        }
     }
     return $true
 }
@@ -556,12 +616,25 @@ try {
             if ($clientMarker -eq 'flowduck-adapter') {
                 if ($method -eq 'POST' -and $target -eq '/api/tabs/focus') {
                     $data = Parse-JsonBody $body
-                    $status = Queue-FocusRequest -TabId ([string]$data.tabId) -Url ([string]$data.url)
+                    $openIfMissing = $false
+                    if ($data.PSObject.Properties.Name -contains 'openIfMissing') {
+                        $openIfMissing = [bool]$data.openIfMissing
+                    }
+                    $status = Queue-FocusRequest `
+                        -TabId ([string]$data.tabId) `
+                        -Url ([string]$data.url) `
+                        -OpenIfMissing $openIfMissing
                     if ($null -eq $status) {
                         Write-HttpResponse $stream 404 'Not Found' '{"code":"TAB_NOT_FOUND"}' 'application/json; charset=utf-8'
                         continue
                     }
-                    $response = @{ requestId = $status.RequestId; tabId = $status.TabId; status = $status.Status } | ConvertTo-Json -Compress
+                    $response = @{
+                        requestId = $status.RequestId
+                        tabId = $status.TabId
+                        targetUrl = $status.TargetUrl
+                        openIfMissing = $status.OpenIfMissing
+                        status = $status.Status
+                    } | ConvertTo-Json -Compress
                     Write-HttpResponse $stream 202 'Accepted' $response 'application/json; charset=utf-8'
                     continue
                 }
@@ -597,7 +670,18 @@ try {
             if ($method -eq 'POST' -and $target -eq '/api/tabs/snapshot') {
                 $data = Parse-JsonBody $body
                 Apply-ChromeTabSnapshot $data.tabs
-                Write-HttpResponse $stream 204 'No Content'
+                $pending = Get-PendingOpenFocusRequest
+                if ($null -eq $pending) {
+                    Write-HttpResponse $stream 204 'No Content'
+                    continue
+                }
+                $response = @{
+                    focusRequestId = $pending.RequestId
+                    preferredTabId = $pending.TabId
+                    targetUrl = $pending.TargetUrl
+                    openIfMissing = $true
+                } | ConvertTo-Json -Compress
+                Write-HttpResponse $stream 200 'OK' $response 'application/json; charset=utf-8'
                 continue
             }
 
@@ -615,7 +699,9 @@ try {
                 $title = Limit-Text ([string]$data.title) 200
                 $url = Limit-Text ([string]$data.url) 2048
                 $windowId = $null
-                if ($null -ne $data.windowId) { $windowId = [int]$data.windowId }
+                if ($data.PSObject.Properties.Name -contains 'windowId' -and $null -ne $data.windowId) {
+                    $windowId = [int]$data.windowId
+                }
 
                 if ([string]::IsNullOrWhiteSpace($id) -or -not (Test-ChatGptUrl $url)) {
                     Write-HttpResponse $stream 400 'Bad Request'
@@ -648,9 +734,12 @@ try {
 
             if ($method -eq 'POST' -and $target -eq '/api/tabs/focus-ack') {
                 $data = Parse-JsonBody $body
+                $ackUrl = ''
+                if ($data.PSObject.Properties.Name -contains 'url') { $ackUrl = [string]$data.url }
                 $accepted = Complete-FocusRequest `
                     -RequestId ([string]$data.requestId) `
                     -TabId ([string]$data.tabId) `
+                    -Url $ackUrl `
                     -Success ([bool]$data.success) `
                     -Error ([string]$data.error)
                 if (-not $accepted) {
@@ -665,7 +754,9 @@ try {
                 $data = Parse-JsonBody $body
                 $id = Limit-Text ([string]$data.tabId) 100
                 $windowId = $null
-                if ($null -ne $data.windowId) { $windowId = [int]$data.windowId }
+                if ($data.PSObject.Properties.Name -contains 'windowId' -and $null -ne $data.windowId) {
+                    $windowId = [int]$data.windowId
+                }
                 Upsert-ChromeTab `
                     -Id $id `
                     -WindowId $windowId `
