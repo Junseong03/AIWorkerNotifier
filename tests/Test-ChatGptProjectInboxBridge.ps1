@@ -42,9 +42,13 @@ Assert-Contains $background "windowId" 'Chrome extension must report window iden
 Assert-Contains $background "FOCUS_ACK_URL" 'Chrome extension focus acknowledgement is missing.'
 Assert-Contains $background "chrome\.tabs\.update" 'Chrome extension must activate the existing tab.'
 Assert-Contains $background "chrome\.windows\.update" 'Chrome extension must foreground the existing Chrome window.'
+Assert-Contains $background "FOCUS_POLL_INTERVAL_MS = 2000" 'Chrome extension must poll focus delivery independently of page timers.'
+Assert-Contains $background "pollFocusRequests" 'Chrome extension background focus polling is missing.'
+Assert-Contains $background "generatingByTab" 'Background focus polling must preserve the latest generation state.'
+Assert-Contains $background "focusRequestsInFlight" 'Duplicate focus execution must be guarded while an acknowledgement is in flight.'
 
-if ([string]$manifest.version -ne '0.1.11') {
-    throw "Expected ChatGPT watcher extension version 0.1.11, got $($manifest.version)"
+if ([string]$manifest.version -ne '0.1.12') {
+    throw "Expected ChatGPT watcher extension version 0.1.12, got $($manifest.version)"
 }
 if (@($manifest.permissions) -notcontains 'tabs') {
     throw 'Chrome extension tabs permission is required for existing-tab focus.'
