@@ -16,7 +16,7 @@ ChatGPT tabs
      - localhost WebSocket browser-control channel
      - exact existing-first focus-or-open
      - serialized browser action
-  ⇅ localhost Bridge 127.0.0.1:43127
+  ⇅ localhost Python Bridge 127.0.0.1:43127
      - disabled-tab selection
      - completion metadata journal
      - generic focus-or-open broker
@@ -31,9 +31,23 @@ FlowDuck 같은 local consumer
 
 AIWorkerNotifier는 FlowDuck Project ID, Project 이름, unread count를 알지 않습니다.
 
-## 설치
+## Runtime 요구사항
 
-Bridge는 설정 콘솔의 `ChatGPT 감시` 메뉴로 시작하는 방식을 권장합니다.
+AIWorkerNotifier 기본 알림·Discord·Cursor 기능의 최소 요구사항은 기존처럼 **Windows + PowerShell 5.1+**입니다.
+
+ChatGPT Bridge 기능은 현재 **Python 3.10+**를 추가로 사용합니다. 서버 구현은 Python 표준 라이브러리만 사용하므로 별도 `pip install`은 필요하지 않습니다.
+
+Python 탐색 순서:
+
+1. `AI_WORKER_NOTIFIER_PYTHON`
+2. `py.exe -3`
+3. `python.exe`
+
+`start-chatgpt-bridge.ps1`은 서버 구현이 아니라 Python Bridge를 시작하고 수명을 연결하는 얇은 compatibility launcher입니다. 기존 설정 콘솔과 FlowDuck Adapter는 이 launcher 진입점을 계속 사용할 수 있습니다.
+
+## 설치와 실행
+
+Bridge는 설정 콘솔의 `ChatGPT 감시` 메뉴로 시작하는 방식을 권장합니다. 이 경우 별도 PowerShell 창을 계속 열어둘 필요가 없습니다.
 
 직접 실행:
 
@@ -47,15 +61,49 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\integrations\chatgpt\start
 http://127.0.0.1:43127/
 ```
 
+Bridge identity/status:
+
+```text
+GET http://127.0.0.1:43127/api/bridge/status
+```
+
+정상 Python Bridge 예시 의미:
+
+```json
+{
+  "schema": "ai-worker-notifier/chatgpt-bridge-status/v1",
+  "service": "ai-worker-notifier-chatgpt-bridge",
+  "implementation": "python",
+  "bridgeVersion": "python-v1",
+  "pid": 1234,
+  "port": 43127,
+  "extensionConnected": true,
+  "extensionVersion": "0.1.15"
+}
+```
+
 Chrome unpacked extension 경로:
 
 ```text
 integrations/chatgpt/chrome-extension/
 ```
 
-현재 browser-control revision은 **0.1.15**, 최소 Chrome 버전은 116입니다.
+현재 browser-control revision은 **0.1.15**, 최소 Chrome 버전은 116입니다. 확장 코드를 갱신한 뒤 `chrome://extensions`에서 확장을 Reload합니다.
 
-확장 코드를 갱신한 뒤 `chrome://extensions`에서 확장을 Reload합니다. Bridge 구현도 바뀐 경우 Bridge를 재시작합니다.
+PowerShell 구현에서 Python Bridge로 갱신한 최초 한 번은 실행 중 legacy Bridge를 종료한 뒤 다시 시작해야 합니다. 이후에는 기존 ON/OFF 관리 경로를 그대로 사용합니다.
+
+## Launcher 수명 계약
+
+설정 콘솔과 FlowDuck은 기존 `start-chatgpt-bridge.ps1` lifecycle을 유지합니다.
+
+```text
+start-chatgpt-bridge.ps1
+→ python -m chatgpt_bridge.main --parent-pid <launcher-pid>
+```
+
+Python Bridge는 Windows에서 launcher PID를 감시합니다. 기존 관리 경로가 launcher를 종료하면 Python child도 함께 종료되므로 orphan Bridge가 43127을 계속 점유하지 않습니다.
+
+이미 새 Python Bridge가 실행 중인 상태에서 launcher를 한 번 더 실행하면 새 Python 프로세스는 `/api/bridge/status`로 기존 Bridge identity를 확인하고 중복 서버를 만들지 않고 정상 종료합니다.
 
 ## 탭 알림 기본값
 
@@ -100,7 +148,7 @@ ai-worker-notifier/chatgpt-completion/v1
 - detected UTC
 - detection mode
 
-최대 최근 500개 파일로 제한합니다.
+최대 최근 500개 파일로 제한하며 temp write 후 atomic replace를 사용합니다.
 
 ## Focus-or-open broker
 
@@ -131,11 +179,11 @@ Bridge request
 → canonical target 포함 ACK
 ```
 
-Bridge의 `$tabs` cache는 새 탭 생성 여부의 정본이 아닙니다.
+Bridge의 tab registry는 관리 UI와 preferred hint 용도이며 새 탭 생성 여부의 정본이 아닙니다.
 
 같은 exact URL tab이 이미 여러 개 있어도 추가 tab을 만들지 않습니다. preferred tabId가 actual exact match일 때 우선하고, 아니면 active/recent match를 사용합니다.
 
-Browser actions는 `browserActionChain`으로 직렬화하여 빠른 연속 요청의 duplicate-create race를 막습니다. 동일 request ID가 push/fallback으로 중복 전달되어도 한 번만 실행합니다.
+Browser actions는 extension의 `browserActionChain`으로 직렬화하여 빠른 연속 요청의 duplicate-create race를 막습니다. 동일 request ID가 push/fallback으로 중복 전달되어도 한 번만 실행합니다.
 
 ## WebSocket control channel
 
@@ -187,12 +235,19 @@ FOCUS_TIMEOUT
 
 `openIfMissing=true` 요청에서 valid target임에도 `TAB_NOT_FOUND`가 나오면 정상 계약 위반입니다. Bridge diagnostics의 실제 `openIfMissing`을 확인합니다.
 
-## Browser-control diagnostics
+## 진단
 
-Bridge PowerShell과 관리 화면에 동일한 bounded recent diagnostics를 남깁니다.
+Python Bridge 로그:
+
+```text
+%LOCALAPPDATA%\AIWorkerNotifier\logs\chatgpt-bridge.log
+```
+
+최대 약 1 MB 로그와 2개 backup을 사용합니다. 관리 화면에도 최근 browser-control 진단 40개를 표시합니다.
 
 ```text
 http://127.0.0.1:43127/
+→ Python Bridge PID
 → 브라우저 제어 채널 상태
 → 최근 browser-control 진단
 ```
@@ -213,17 +268,6 @@ Extension service-worker DevTools에는 다음 prefix를 사용합니다.
 ```text
 [AIWorkerNotifier][browser-control]
 ```
-
-주요 event:
-
-- `socket-open`, `socket-close`
-- `socket-focus-action-received`
-- `focus-action-queued`
-- `focus-action-resolve`
-- `focus-existing-tab-success`
-- `focus-create-tab-start/success`
-- `focus-ack-send/result`
-- `watcher-injected`
 
 진단 로그에도 prompt/response 본문은 포함하지 않습니다.
 
@@ -246,14 +290,18 @@ tests/Test-ChatGptProjectInboxBridge.ps1
 
 검증:
 
-- Windows PowerShell explicit UTF-8 parse
-- launcher dot-source scope
-- WebSocket handshake/subprotocol/keepalive
+- thin PowerShell launcher parse/entrypoint
+- Python 3.10+ resolver
+- Python Bridge module import
+- localhost HTTP + WebSocket 101 round-trip
+- `openIfMissing=true` focus push
+- ACK → focus-status `focused`
+- Bridge identity/status endpoint
+- completion journal/schema/diagnostics contract
 - actual `chrome.tabs.query({})`
 - exact existing-first / no-match create
 - action serialization / request dedupe
 - foreground window
-- structured errors / Bridge diagnostics
 - extension 0.1.15
 - stale content context guard / reinjection markers
 
