@@ -23,10 +23,12 @@ $completionJournalLimit = 500
 $focusRequestTtlSeconds = 15
 $focusSocketProtocol = 'ai-worker-notifier-chatgpt-v1'
 $focusSocketKeepAliveSeconds = 20
+$focusDebugLimit = 40
 $tabs = @{}
 $disabledTabs = @{}
 $focusRequestsByTab = @{}
 $focusStatusById = @{}
+$focusDebugEntries = New-Object Collections.Generic.Queue[string]
 $focusSocketClient = $null
 $focusSocketStream = $null
 $focusSocketVersion = ''
@@ -44,6 +46,16 @@ function Limit-Text {
     $clean = ($Value -replace "[\r\n\t]+", ' ').Trim()
     if ($clean.Length -gt $MaxLength) { return $clean.Substring(0, $MaxLength) }
     return $clean
+}
+
+function Add-FocusDebug {
+    param([string]$Message)
+    $line = "[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss.fff'), (Limit-Text $Message 2000)
+    Write-Host $line
+    $script:focusDebugEntries.Enqueue($line)
+    while ($script:focusDebugEntries.Count -gt $focusDebugLimit) {
+        [void]$script:focusDebugEntries.Dequeue()
+    }
 }
 
 function Load-DisabledTabs {
@@ -97,6 +109,7 @@ function Remove-StaleFocusRequests {
             if ($status.Status -eq 'pending') {
                 $status.Status = 'timeout'
                 $status.Error = 'Chrome tab focus acknowledgement timed out.'
+                Add-FocusDebug ("focus timeout request={0} target={1}" -f $requestId, $status.TargetUrl)
             }
         }
     }
@@ -247,6 +260,12 @@ function Get-ManagementHtml {
     else {
         '연결 안 됨'
     }
+    $focusDebugText = if ($focusDebugEntries.Count -eq 0) {
+        '아직 browser-control 요청이 없습니다.'
+    }
+    else {
+        ($focusDebugEntries.ToArray() -join "`n")
+    }
 
     return @"
 <!doctype html>
@@ -257,7 +276,7 @@ function Get-ManagementHtml {
 <meta http-equiv="refresh" content="5">
 <title>AIWorkerNotifier - ChatGPT 탭</title>
 <style>
-body{font-family:Segoe UI,Malgun Gothic,sans-serif;max-width:980px;margin:40px auto;padding:0 20px;color:#202124;background:#f7f8fa}h1{margin-bottom:8px}.hint{color:#5f6368;margin-top:0}.panel{background:white;border:1px solid #dadce0;border-radius:12px;padding:18px}.tab-row{display:grid;grid-template-columns:28px 1fr 110px 110px;gap:12px;align-items:center;padding:14px 8px;border-bottom:1px solid #eee}.tab-row:last-child{border-bottom:0}.tab-main{min-width:0}.tab-main strong,.tab-main small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.tab-main small{color:#70757a;margin-top:4px}.state{font-size:13px;color:#5f6368}.actions{margin-top:18px;display:flex;gap:10px;align-items:center}button{border:0;border-radius:8px;padding:10px 16px;font-weight:600;cursor:pointer}button.primary{background:#1a73e8;color:white}.empty{color:#70757a;padding:12px}.privacy{font-size:13px;color:#70757a;margin-top:18px}code{font-size:12px}
+body{font-family:Segoe UI,Malgun Gothic,sans-serif;max-width:980px;margin:40px auto;padding:0 20px;color:#202124;background:#f7f8fa}h1{margin-bottom:8px}.hint{color:#5f6368;margin-top:0}.panel{background:white;border:1px solid #dadce0;border-radius:12px;padding:18px}.tab-row{display:grid;grid-template-columns:28px 1fr 110px 110px;gap:12px;align-items:center;padding:14px 8px;border-bottom:1px solid #eee}.tab-row:last-child{border-bottom:0}.tab-main{min-width:0}.tab-main strong,.tab-main small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.tab-main small{color:#70757a;margin-top:4px}.state{font-size:13px;color:#5f6368}.actions{margin-top:18px;display:flex;gap:10px;align-items:center}button{border:0;border-radius:8px;padding:10px 16px;font-weight:600;cursor:pointer}button.primary{background:#1a73e8;color:white}.empty{color:#70757a;padding:12px}.privacy{font-size:13px;color:#70757a;margin-top:18px}code{font-size:12px}.diag{margin-top:18px}.diag pre{white-space:pre-wrap;word-break:break-all;background:#111827;color:#e5e7eb;border-radius:8px;padding:12px;max-height:320px;overflow:auto;font:12px/1.5 Consolas,monospace}
 </style>
 </head>
 <body>
@@ -268,6 +287,7 @@ body{font-family:Segoe UI,Malgun Gothic,sans-serif;max-width:980px;margin:40px a
 $listHtml
 <div class="actions"><button class="primary" type="submit">선택 저장</button><span>체크 해제한 탭의 완료 이벤트만 무시됩니다.</span></div>
 </form>
+<section class="panel diag"><strong>최근 browser-control 진단</strong><pre>$(HtmlEncode $focusDebugText)</pre></section>
 <p class="privacy">탭 목록은 Chrome의 탭 이벤트와 snapshot으로 유지합니다. snapshot 누락만으로 열린 탭을 삭제하지 않습니다. DOM 감시는 생성 중/완료 상태만 확인하며 응답 본문과 입력 프롬프트는 읽지 않습니다.</p>
 </body>
 </html>
@@ -402,7 +422,10 @@ function Write-WebSocketTextFrame {
 function Send-FocusSocketPayload {
     param($Payload)
 
-    if ($null -eq $script:focusSocketStream) { return $false }
+    if ($null -eq $script:focusSocketStream) {
+        Add-FocusDebug 'socket push skipped: extension channel is not connected'
+        return $false
+    }
     try {
         $json = $Payload | ConvertTo-Json -Compress -Depth 5
         Write-WebSocketTextFrame -Stream $script:focusSocketStream -Text $json
@@ -410,6 +433,7 @@ function Send-FocusSocketPayload {
         return $true
     }
     catch {
+        Add-FocusDebug ("socket push failed: {0}" -f $_.Exception.Message)
         Close-ExtensionFocusSocket
         return $false
     }
@@ -475,7 +499,7 @@ function Accept-ExtensionFocusSocket {
     $script:focusSocketStream = $Stream
     $script:focusSocketVersion = Limit-Text $version 40
     $script:focusSocketLastWriteUtc = [DateTime]::UtcNow
-    Write-Host ("[{0}] Chrome extension browser-control channel connected: {1}" -f (Get-Date -Format 'HH:mm:ss'), $script:focusSocketVersion)
+    Add-FocusDebug ("Chrome extension browser-control channel connected: {0}" -f $script:focusSocketVersion)
     return $true
 }
 
@@ -672,16 +696,29 @@ function Complete-FocusRequest {
     $idValue = Limit-Text $RequestId 100
     $tabIdValue = Limit-Text $TabId 100
     $ackUrl = Get-CanonicalChatGptUrl $Url
-    if (-not $focusStatusById.ContainsKey($idValue)) { return $false }
+    if (-not $focusStatusById.ContainsKey($idValue)) {
+        Add-FocusDebug ("focus ACK rejected unknown request={0}" -f $idValue)
+        return $false
+    }
     $status = $focusStatusById[$idValue]
-    if ($status.Status -ne 'pending') { return $false }
+    if ($status.Status -ne 'pending') {
+        Add-FocusDebug ("focus ACK rejected request={0} status={1}" -f $idValue, $status.Status)
+        return $false
+    }
 
     if ($status.OpenIfMissing -eq $true) {
-        if ($ackUrl -ne [string]$status.TargetUrl) { return $false }
-        if ($Success -and $tabIdValue -notlike 'chrome-*') { return $false }
+        if ($ackUrl -ne [string]$status.TargetUrl) {
+            Add-FocusDebug ("focus ACK rejected request={0} url-mismatch expected={1} actual={2}" -f $idValue, $status.TargetUrl, $ackUrl)
+            return $false
+        }
+        if ($Success -and $tabIdValue -notlike 'chrome-*') {
+            Add-FocusDebug ("focus ACK rejected request={0} invalid-tab={1}" -f $idValue, $tabIdValue)
+            return $false
+        }
         if ($Success) { $status.TabId = $tabIdValue }
     }
     elseif ([string]$status.TabId -ne $tabIdValue) {
+        Add-FocusDebug ("focus ACK rejected request={0} tab-mismatch expected={1} actual={2}" -f $idValue, $status.TabId, $tabIdValue)
         return $false
     }
 
@@ -694,6 +731,7 @@ function Complete-FocusRequest {
         $status.Error = Limit-Text $Error 300
     }
 
+    Add-FocusDebug ("focus ACK accepted request={0} success={1} tab={2} target={3} error={4}" -f $idValue, $Success, $tabIdValue, $status.TargetUrl, $status.Error)
     foreach ($mappedTabId in @($focusRequestsByTab.Keys)) {
         if ([string]$focusRequestsByTab[$mappedTabId] -eq $idValue) {
             $focusRequestsByTab.Remove($mappedTabId)
@@ -785,28 +823,49 @@ try {
             if ($clientMarker -eq 'flowduck-adapter') {
                 if ($method -eq 'POST' -and $target -eq '/api/tabs/focus') {
                     $data = Parse-JsonBody $body
+                    $rawTabId = Limit-Text ([string]$data.tabId) 100
+                    $rawUrl = Limit-Text ([string]$data.url) 2048
+                    $canonicalUrl = Get-CanonicalChatGptUrl $rawUrl
                     $openIfMissing = $false
                     if ($data.PSObject.Properties.Name -contains 'openIfMissing') {
                         $openIfMissing = [bool]$data.openIfMissing
                     }
-                    $status = Queue-FocusRequest `
-                        -TabId ([string]$data.tabId) `
-                        -Url ([string]$data.url) `
-                        -OpenIfMissing $openIfMissing
-                    if ($null -eq $status) {
-                        Write-HttpResponse $stream 404 'Not Found' '{"code":"TAB_NOT_FOUND"}' 'application/json; charset=utf-8'
+                    Add-FocusDebug ("focus request tab={0} raw={1} canonical={2} openIfMissing={3} socket={4}" -f $rawTabId, $rawUrl, $canonicalUrl, $openIfMissing, ($null -ne $focusSocketStream))
+
+                    if ([string]::IsNullOrWhiteSpace($canonicalUrl)) {
+                        $response = @{
+                            code = 'INVALID_TARGET_URL'
+                            message = 'FlowDuck이 전달한 현재 GPT 세션 URL을 ChatGPT URL로 해석하지 못했습니다.'
+                        } | ConvertTo-Json -Compress
+                        Add-FocusDebug ("focus rejected INVALID_TARGET_URL raw={0}" -f $rawUrl)
+                        Write-HttpResponse $stream 400 'Bad Request' $response 'application/json; charset=utf-8'
                         continue
                     }
 
-                    if ($status.OpenIfMissing -eq $true -and -not (Push-FocusRequestToExtension $status)) {
-                        $status.Status = 'failed'
-                        $status.Error = 'Chrome extension browser-control channel is unavailable.'
-                        $response = @{
-                            code = 'EXTENSION_CHANNEL_UNAVAILABLE'
-                            message = 'Chrome 확장 제어 채널이 연결되지 않았습니다. AIWorkerNotifier ChatGPT Watcher 0.1.14를 새로고침한 뒤 다시 시도하세요.'
-                        } | ConvertTo-Json -Compress
-                        Write-HttpResponse $stream 503 'Service Unavailable' $response 'application/json; charset=utf-8'
+                    $status = Queue-FocusRequest `
+                        -TabId $rawTabId `
+                        -Url $canonicalUrl `
+                        -OpenIfMissing $openIfMissing
+                    if ($null -eq $status) {
+                        Add-FocusDebug ("focus rejected TAB_NOT_FOUND target={0} openIfMissing={1}" -f $canonicalUrl, $openIfMissing)
+                        Write-HttpResponse $stream 404 'Not Found' '{"code":"TAB_NOT_FOUND","message":"Matching Chrome tab was not found and tab creation was not requested."}' 'application/json; charset=utf-8'
                         continue
+                    }
+
+                    Add-FocusDebug ("focus queued request={0} preferred={1} target={2} openIfMissing={3}" -f $status.RequestId, $status.TabId, $status.TargetUrl, $status.OpenIfMissing)
+                    if ($status.OpenIfMissing -eq $true) {
+                        $pushed = Push-FocusRequestToExtension $status
+                        Add-FocusDebug ("focus push request={0} pushed={1}" -f $status.RequestId, $pushed)
+                        if (-not $pushed) {
+                            $status.Status = 'failed'
+                            $status.Error = 'Chrome extension browser-control channel is unavailable.'
+                            $response = @{
+                                code = 'EXTENSION_CHANNEL_UNAVAILABLE'
+                                message = 'Chrome 확장 제어 채널이 연결되지 않았습니다. AIWorkerNotifier ChatGPT Watcher 0.1.15를 새로고침한 뒤 다시 시도하세요.'
+                            } | ConvertTo-Json -Compress
+                            Write-HttpResponse $stream 503 'Service Unavailable' $response 'application/json; charset=utf-8'
+                            continue
+                        }
                     }
 
                     $response = @{
@@ -917,6 +976,9 @@ try {
                 $data = Parse-JsonBody $body
                 $ackUrl = ''
                 if ($data.PSObject.Properties.Name -contains 'url') { $ackUrl = [string]$data.url }
+                $opened = $false
+                if ($data.PSObject.Properties.Name -contains 'opened') { $opened = [bool]$data.opened }
+                Add-FocusDebug ("focus ACK received request={0} tab={1} url={2} success={3} opened={4} error={5}" -f ([string]$data.requestId), ([string]$data.tabId), $ackUrl, ([bool]$data.success), $opened, ([string]$data.error))
                 $accepted = Complete-FocusRequest `
                     -RequestId ([string]$data.requestId) `
                     -TabId ([string]$data.tabId) `
