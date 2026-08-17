@@ -15,6 +15,8 @@ ChatGPT 웹 브라우저에서 **응답 생성이 끝났는지 여부만** 감�
      - 생성 중 여부
      - 완료 signal
   -> Chrome 확장 service worker
+     - 열린 ChatGPT 탭 snapshot
+     - background focus queue poll
   -> localhost bridge (127.0.0.1:43127)
      - 체크 해제된 탭만 제외
      - generic completion metadata journal
@@ -136,6 +138,8 @@ journal은 최대 최근 500개 파일로 제한합니다. 동일 stable event I
 
 Chrome 확장 `0.1.11`부터 bridge는 local consumer가 **현재 열려 있는 ChatGPT 탭을 새 탭 생성 없이 foreground**할 수 있는 최소 broker를 제공합니다.
 
+`0.1.12`부터 focus request 전달은 target 페이지의 JavaScript heartbeat에만 의존하지 않습니다. 오래 숨겨진 Chrome 탭은 페이지 `setInterval`이 강하게 throttle될 수 있으므로 extension service worker가 약 2초마다 열린 ChatGPT 탭을 조회하고 기존 heartbeat endpoint를 통해 focus queue를 확인합니다. content watcher heartbeat 경로는 기존 fallback 및 생성 상태 갱신용으로 유지합니다.
+
 Flow:
 
 ```text
@@ -143,10 +147,11 @@ local consumer
 → POST /api/tabs/focus
 → Bridge가 현재 tabId 또는 canonical URL로 열린 탭 검색
 → focus request queue
-→ 해당 탭의 heartbeat 응답에 focusRequestId 포함
-→ extension background
-   chrome.tabs.update(tabId, { active: true })
-   chrome.windows.update(windowId, { focused: true })
+→ extension background service worker가 열린 ChatGPT 탭을 주기적으로 확인
+   ↘ target page heartbeat도 동일 queue를 확인하는 fallback으로 유지
+→ focusRequestId 확인
+→ chrome.tabs.update(tabId, { active: true })
+→ chrome.windows.update(windowId, { focused: true })
 → POST /api/tabs/focus-ack
 → consumer가 /api/tabs/focus-status polling
 ```
@@ -208,6 +213,7 @@ Chrome watcher와 bridge가 사용하는 정보는 다음 범위로 제한합니
 - ChatGPT가 아닌 URL은 탭 등록 거부
 - snapshot 누락만으로 열린 Chrome 탭을 삭제하지 않음
 - focus broker는 현재 bridge가 알고 있는 ChatGPT 탭만 대상으로 함
+- background focus poll도 기존 loopback heartbeat endpoint와 tab metadata 범위만 사용
 - 응답 내용과 프롬프트는 bridge로 보내지 않음
 - Discord Webhook secret은 기존 DPAPI 저장소에만 유지
 
