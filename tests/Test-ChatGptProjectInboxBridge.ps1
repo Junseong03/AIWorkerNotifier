@@ -8,6 +8,7 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $bridgePath = Join-Path $repoRoot 'integrations\chatgpt\start-chatgpt-bridge.ps1'
 $bridgeImplementationPath = Join-Path $repoRoot 'integrations\chatgpt\start-chatgpt-bridge.impl.ps1'
 $backgroundPath = Join-Path $repoRoot 'integrations\chatgpt\chrome-extension\background.js'
+$contentPath = Join-Path $repoRoot 'integrations\chatgpt\chrome-extension\content.js'
 $manifestPath = Join-Path $repoRoot 'integrations\chatgpt\chrome-extension\manifest.json'
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 
@@ -60,6 +61,7 @@ function Read-And-AssertPowerShellUtf8 {
 $launcher = Read-And-AssertPowerShellUtf8 $bridgePath 'ChatGPT bridge launcher'
 $bridge = Read-And-AssertPowerShellUtf8 $bridgeImplementationPath 'ChatGPT bridge implementation'
 $background = [IO.File]::ReadAllText($backgroundPath, $utf8)
+$content = [IO.File]::ReadAllText($contentPath, $utf8)
 $manifest = [IO.File]::ReadAllText($manifestPath, $utf8) | ConvertFrom-Json
 
 Assert-Contains $launcher "start-chatgpt-bridge\.impl\.ps1" 'Bridge launcher must load the UTF-8 implementation file.'
@@ -82,6 +84,11 @@ Assert-Contains $bridge "101 Switching Protocols" 'Bridge WebSocket handshake is
 Assert-Contains $bridge "Send-FocusSocketPayload" 'Bridge must push browser actions to the connected extension.'
 Assert-Contains $bridge "type = 'focus-or-open'" 'Bridge must push typed focus-or-open actions.'
 Assert-Contains $bridge "EXTENSION_CHANNEL_UNAVAILABLE" 'Bridge must fail fast when the browser control channel is unavailable.'
+Assert-Contains $bridge "INVALID_TARGET_URL" 'Bridge must distinguish an invalid current-session URL from a missing tab.'
+Assert-Contains $bridge "focusDebugEntries" 'Bridge must retain bounded browser-control diagnostics.'
+Assert-Contains $bridge "최근 browser-control 진단" 'Bridge management page must surface browser-control diagnostics.'
+Assert-Contains $bridge "focus request tab=" 'Bridge must log the incoming focus-or-open contract.'
+Assert-Contains $bridge "focus ACK received" 'Bridge must log extension acknowledgements.'
 Assert-Contains $bridge "focusSocketKeepAliveSeconds = 20" 'Bridge WebSocket keepalive must remain inside the MV3 idle window.'
 Assert-Contains $bridge "completionJournalLimit = 500" 'Completion journal retention must remain bounded.'
 
@@ -101,11 +108,19 @@ Assert-Contains $background "enqueueBrowserFocusAction" 'Browser focus-or-open a
 Assert-Contains $background "browserActionChain" 'Serialized browser action chain is missing.'
 Assert-Contains $background "queuedFocusRequestIds" 'Duplicate delivery of the same focus request must be suppressed.'
 Assert-Contains $background "focusRequestsInFlight" 'Duplicate focus execution must be guarded while an acknowledgement is in flight.'
+Assert-Contains $background "\[AIWorkerNotifier\]\[browser-control\]" 'Chrome background must emit browser-control diagnostics.'
+Assert-Contains $background "socket-focus-action-received" 'Chrome background must log pushed focus-or-open receipt.'
+Assert-Contains $background "watcher-injected" 'Chrome background must report content watcher reinjection.'
 Assert-NotContains $background "FOCUS_POLL_INTERVAL_MS" 'Focus delivery must not depend on a service-worker setInterval polling loop.'
 Assert-NotContains $background "pollFocusRequests" 'Focus delivery must not depend on a service-worker polling function.'
 
-if ([string]$manifest.version -ne '0.1.14') {
-    throw "Expected ChatGPT watcher extension version 0.1.14, got $($manifest.version)"
+Assert-Contains $content "WATCHER_VERSION = '0\.1\.15'" 'Content watcher version must track the extension reload-recovery revision.'
+Assert-Contains $content "extensionRuntimeAvailable" 'Content watcher must detect an invalidated extension runtime before sendMessage.'
+Assert-Contains $content "stopping stale watcher" 'Content watcher must stop itself when an old extension context is invalidated.'
+Assert-LiteralNotContains $content 'if (existing?.version === WATCHER_VERSION && existing?.active === true) return;' 'Reinjection must replace an old watcher even when the page-global version marker matches.'
+
+if ([string]$manifest.version -ne '0.1.15') {
+    throw "Expected ChatGPT watcher extension version 0.1.15, got $($manifest.version)"
 }
 if ([string]$manifest.minimum_chrome_version -ne '116') {
     throw 'Expected minimum Chrome version 116 for WebSocket service-worker lifetime support.'
