@@ -1,114 +1,83 @@
 # ChatGPT 완료 알림 통합 (실험적)
 
-ChatGPT 웹 브라우저에서 **응답 생성이 끝났는지 여부만** 감지해 기존 AIWorkerNotifier의 Discord 알림 파이프라인으로 전달합니다.
+ChatGPT 웹에서 **응답 생성이 끝났는지 여부와 generic tab/browser metadata만** 감지해 AIWorkerNotifier 알림 파이프라인과 local consumer Adapter에 전달합니다.
 
-여러 ChatGPT 탭이 열려 있어도 각 탭을 별도로 식별합니다. 새로 감지된 탭은 기본적으로 알림이 활성화되며, 사용자가 관리 화면에서 **체크 해제한 탭만 알림 대상에서 제외**합니다.
-
-응답 본문과 입력 프롬프트의 내용은 읽거나 저장하지 않습니다.
+응답 본문과 입력 프롬프트 내용은 읽거나 저장하지 않습니다.
 
 ## 동작 구조
 
 ```text
-여러 ChatGPT 탭
-  -> Chrome 확장 content watcher
-     - tab/window identity / title / URL
-     - 생성 중 여부
-     - 완료 signal
-  -> Chrome 확장 service worker
-     - 실제 열린 Chrome tab snapshot
+ChatGPT tabs
+  → content watcher
+     - 생성 중/완료 signal
+     - tab/window identity는 background가 보강
+  → extension service worker
+     - actual Chrome tabs query
      - localhost WebSocket browser-control channel
-     - exact existing tab 선택 / 필요 시 새 tab 생성
-     - browser action 직렬화
-  <-> localhost bridge (127.0.0.1:43127)
-     - 체크 해제된 탭만 제외
-     - generic completion metadata journal
-     - generic ChatGPT focus-or-open broker
-     - WebSocket keepalive / action push
-  -> 완료 이벤트를 ai-task-complete로 큐 등록
-  -> 기존 inbox / notifier / Discord
+     - exact existing-first focus-or-open
+     - serialized browser action
+  ⇅ localhost Bridge 127.0.0.1:43127
+     - disabled-tab selection
+     - completion metadata journal
+     - generic focus-or-open broker
+     - WebSocket keepalive/action push
+     - bounded browser-control diagnostics
+  → 기존 notification queue / Discord
+
+FlowDuck 같은 local consumer
+  → current ChatGPT URL + openIfMissing=true
+  → Bridge
 ```
 
-Discord Webhook URL은 브라우저에 전달하지 않습니다. 기존 AIWorkerNotifier의 DPAPI 저장 및 전달기를 그대로 사용합니다.
+AIWorkerNotifier는 FlowDuck Project ID, Project 이름, unread count를 알지 않습니다.
 
-## 설치 및 사용
+## 설치
 
-### 1. AIWorkerNotifier 알림 전달 준비
+Bridge는 설정 콘솔의 `ChatGPT 감시` 메뉴로 시작하는 방식을 권장합니다.
 
-기존 방식대로 Webhook을 설정하고 알림 전달을 ON으로 둡니다.
-
-### 2. ChatGPT bridge 실행
-
-설정 콘솔의 `ChatGPT 감시` 메뉴에서 bridge를 시작하는 방식을 권장합니다.
-
-직접 실행하려면 저장소 루트에서:
+직접 실행:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\integrations\chatgpt\start-chatgpt-bridge.ps1
 ```
 
-기본 포트는 `43127`이며 loopback(`127.0.0.1`)에만 바인딩됩니다.
-
-관리 화면 주소:
+관리 화면:
 
 ```text
 http://127.0.0.1:43127/
 ```
 
-관리 화면에서는 탭 목록 외에 browser-control channel 상태도 확인할 수 있습니다.
-
-```text
-브라우저 제어 채널: 연결됨 (extension 0.1.14)
-```
-
-관리 화면 자체는 감시를 수행하지 않는 UI이므로 계속 열어둘 필요가 없습니다.
-
-### 3. Chrome 확장 설치
-
-Chrome `chrome://extensions`에서 개발자 모드를 켠 뒤 다음 디렉터리를 **압축해제된 확장 프로그램**으로 한 번 등록합니다.
+Chrome unpacked extension 경로:
 
 ```text
 integrations/chatgpt/chrome-extension/
 ```
 
-적용 대상은 다음 두 호스트입니다.
+현재 browser-control revision은 **0.1.15**, 최소 Chrome 버전은 116입니다.
 
-```text
-https://chatgpt.com/*
-https://chat.openai.com/*
-```
-
-확장 코드를 업데이트한 뒤에는 `chrome://extensions`에서 확장을 새로고침합니다.
-
-현재 focus-or-open/browser-control 동작은 extension `0.1.14` 기준이며 최소 Chrome 버전은 116입니다.
+확장 코드를 갱신한 뒤 `chrome://extensions`에서 확장을 Reload합니다. Bridge 구현도 바뀐 경우 Bridge를 재시작합니다.
 
 ## 탭 알림 기본값
 
-탭 선택 모델은 whitelist가 아니라 **disabled list** 방식입니다.
+Disabled-list 모델입니다.
 
-- 새로 감지된 ChatGPT 탭: 기본 알림 ON
-- 관리 화면에서 체크 해제: 해당 탭 알림 OFF
-- 다시 체크: 해당 탭 알림 ON
-- 체크 해제 상태 저장: `%LOCALAPPDATA%\AIWorkerNotifier\state\chatgpt-disabled-tabs.json`
+- 새 ChatGPT 탭 → 알림 ON
+- 관리 화면에서 체크 해제 → 해당 탭만 OFF
+- 상태 파일 → `%LOCALAPPDATA%\AIWorkerNotifier\state\chatgpt-disabled-tabs.json`
 
-Chrome 탭이 실제로 닫히거나 ChatGPT URL을 벗어나면 해당 탭 레코드는 제거됩니다. Chrome 확장 탭의 존재 여부는 짧은 heartbeat TTL로 삭제하지 않고 Chrome tab 이벤트와 비파괴 snapshot을 기준으로 유지합니다.
+Chrome tab 존재 여부는 실제 tab 이벤트와 non-destructive snapshot으로 유지합니다.
 
-## 완료 감지 규칙
+## 완료 감지
 
-현재 Chrome watcher의 핵심 규칙은 다음과 같습니다.
+- Stop 생성 control을 관찰하면 실제 생성 상태를 본 것으로 기록
+- 생성 중 composer edit 직후 Stop 소실은 완료로 사용하지 않음
+- 오염되지 않은 Stop 소실은 짧게 재확인 후 완료
+- composer 영향으로 오염되면 최신 assistant final-action UI까지 확인
+- 한 turn당 완료 이벤트 1회
+- turn마다 local `turnId`
+- prompt/response 문자열 미수집
 
-- Stop 생성 컨트롤이 보이면 해당 턴에서 실제 생성 상태를 관찰한 것으로 기록
-- 생성 중 사용자가 composer를 편집한 직후 Stop이 사라지면 그 소실을 완료로 사용하지 않음
-- 오염되지 않은 Stop 소실은 연속 확인 후 완료 후보로 사용
-- composer 변화로 Stop 소실이 오염되면 최신 assistant turn의 완료 후 Action UI까지 확인한 뒤 완료 처리
-- 한 턴당 완료 이벤트는 한 번만 전송
-- 턴마다 고유 `turnId`를 생성해 bridge의 dispatch ID에 포함
-- 체크 해제된 탭의 완료 이벤트는 bridge에서 무시
-
-일반 DOM 변경만으로 완료 이벤트를 만들지 않습니다. 입력 문자열과 응답 본문은 읽지 않습니다.
-
-## Generic completion journal
-
-선택된 ChatGPT 탭에서 완료 이벤트가 발생하면 bridge는 기존 Discord notification queue와 별도로 **generic completion metadata**를 로컬 journal에 기록합니다.
+## Completion journal
 
 ```text
 %LOCALAPPDATA%\AIWorkerNotifier\state\chatgpt-completions\
@@ -122,24 +91,18 @@ ai-worker-notifier/chatgpt-completion/v1
 
 저장 정보:
 
-- stable event ID (`tabId + turnId`, turnId가 없으면 감지 시각 fallback)
-- Chrome tab ID
-- Chrome window ID (가능한 경우)
-- 탭 제목
+- stable event ID
+- tab ID
+- optional window ID
+- title
 - ChatGPT URL
 - turn ID
-- 완료 감지 UTC 시각
+- detected UTC
 - detection mode
 
-journal은 최대 최근 500개 파일로 제한합니다. 동일 stable event ID의 파일이 이미 있으면 중복 기록하지 않습니다.
+최대 최근 500개 파일로 제한합니다.
 
-이 journal은 특정 Project 제품에 종속된 저장소가 아닙니다. 외부 local consumer가 완료 metadata를 읽을 수 있게 하는 Adapter seam이며 AIWorkerNotifier는 Project ID, Project 이름, unread count를 저장하거나 계산하지 않습니다.
-
-## ChatGPT focus-or-open broker
-
-Chrome 확장 `0.1.13`부터 local consumer는 현재 ChatGPT URL을 기준으로 **exact existing tab을 우선 재사용하고, 실제로 없을 때만 새 탭을 하나 여는** generic browser action을 요청할 수 있습니다.
-
-`0.1.14`부터 이 browser action의 전달은 service-worker timer polling이 아니라 localhost WebSocket push를 primary로 사용합니다.
+## Focus-or-open broker
 
 Consumer request:
 
@@ -151,139 +114,153 @@ Consumer request:
 }
 ```
 
-중요한 원칙은 Bridge의 `$tabs` cache를 새 탭 생성 판단의 정본으로 사용하지 않는 것입니다.
+원칙:
 
 ```text
-Bridge
-→ request queue
-→ WebSocket으로 extension에 focus-or-open 즉시 push
-→ extension이 chrome.tabs.query({})로 실제 현재 탭 전체 조회
-→ target과 각 tab URL canonicalize
-→ exact match 존재
-   → 새 tab 생성 금지
-   → preferred tabId가 실제 exact match면 우선
-   → 아니면 active/recent existing match 선택
-→ exact match 없음
-   → chrome.tabs.create() 정확히 한 번
-→ 선택/생성 tab active
-→ 최소화 window 복원
-→ chrome.windows.update(windowId, {focused:true})
-→ canonical target URL 포함 focus ack
+Bridge request
+→ WebSocket push
+→ extension이 chrome.tabs.query({})
+→ target/tab URL canonicalize
+→ exact match 있음
+   → existing tab 재사용
+→ exact match 없음 + openIfMissing=true
+   → 새 tab 정확히 1개 생성
+→ tab active
+→ minimized window restore
+→ chrome.windows.update(focused=true)
+→ canonical target 포함 ACK
 ```
 
-Canonical 비교는 다음을 통합합니다.
+Bridge의 `$tabs` cache는 새 탭 생성 여부의 정본이 아닙니다.
 
-- `chat.openai.com` / `www.chatgpt.com` → `chatgpt.com`
-- query / fragment 제거
-- trailing slash 정규화
-- path 보존
+같은 exact URL tab이 이미 여러 개 있어도 추가 tab을 만들지 않습니다. preferred tabId가 actual exact match일 때 우선하고, 아니면 active/recent match를 사용합니다.
 
-같은 exact URL 탭이 이미 여러 개 있어도 새 탭을 추가하지 않습니다.
+Browser actions는 `browserActionChain`으로 직렬화하여 빠른 연속 요청의 duplicate-create race를 막습니다. 동일 request ID가 push/fallback으로 중복 전달되어도 한 번만 실행합니다.
 
-빠른 연속 요청은 extension의 `browserActionChain`에서 직렬화됩니다. 첫 요청의 query→focus/create가 끝난 뒤 다음 요청이 새 `chrome.tabs.query({})`를 수행하므로 두 요청이 동시에 `탭 없음`을 보고 각각 새 탭을 만드는 race를 방지합니다.
-
-동일 request ID가 WebSocket push와 snapshot fallback 양쪽으로 전달되는 경우도 `queuedFocusRequestIds`로 한 번만 실행합니다.
-
-`tabId`는 preference hint입니다. 해당 ID가 실제로 target URL과 일치하지 않으면 버리고 다른 exact match를 사용합니다.
-
-### Foreground 의미
-
-`chrome.tabs.update(..., {active:true})`로 tab을 선택한 뒤 `chrome.windows.update(..., {focused:true})`로 Chrome window 자체를 foreground합니다. 최소화된 window는 먼저 normal 상태로 복원합니다.
-
-기존 normal Chrome window가 없고 새 세션을 열어야 하는 경우에는 target URL을 가진 normal Chrome window를 새로 만들 수 있습니다.
-
-### WebSocket control channel
+## WebSocket control channel
 
 ```text
-ws://127.0.0.1:43127/api/extension/socket?version=0.1.14
+ws://127.0.0.1:43127/api/extension/socket?version=0.1.15
 Sec-WebSocket-Protocol: ai-worker-notifier-chatgpt-v1
 ```
 
-Bridge는 extension WebSocket Origin과 전용 subprotocol을 검증합니다. 연결이 유지되는 동안 약 20초 간격의 keepalive message를 extension에 보내 browser-control service worker가 idle timer에만 의존하지 않게 합니다.
+- loopback only
+- extension Origin 검증
+- 전용 subprotocol 검증
+- Bridge keepalive 약 20초
+- focus-or-open은 service-worker timer polling 없이 push
+- socket 없음 → `EXTENSION_CHANNEL_UNAVAILABLE`
+- snapshot response는 compatibility fallback
 
-Control channel이 없으면 consumer의 focus-or-open 요청을 pending timeout으로 방치하지 않습니다.
+## 0.1.15 reload recovery
+
+Unpacked extension Reload는 열린 ChatGPT page 자체를 Reload하지 않습니다. 이전 content script가 invalidated extension context를 가진 채 살아 있을 수 있고 실제 Windows에서 다음 오류가 확인됐습니다.
 
 ```text
-HTTP 503
+TypeError: Cannot read properties of undefined (reading 'sendMessage')
+```
+
+0.1.15:
+
+- `sendMessage` 전 `chrome.runtime.sendMessage` availability 확인
+- invalidated context 감지 시 stale watcher self-stop
+- 새 watcher injection은 기존 active watcher를 교체
+- WebSocket open에서 열린 ChatGPT tabs에 watcher 재주입
+- ChatGPT tab activation에서도 watcher 재주입
+- browser focus-or-open 자체는 content heartbeat에 의존하지 않음
+
+## Structured errors
+
+```text
+INVALID_TARGET_URL
+→ consumer가 전달한 current URL을 ChatGPT canonical URL로 해석할 수 없음
+
+TAB_NOT_FOUND
+→ focus-only 요청이고 exact tab이 없으며 create가 요청되지 않음
+
 EXTENSION_CHANNEL_UNAVAILABLE
+→ Bridge↔extension browser-control channel 없음
+
+FOCUS_TIMEOUT
+→ focus request queue 이후 ACK 미수신
 ```
 
-이 경우 extension `0.1.14` 새로고침 및 Bridge 재시작 여부를 바로 진단할 수 있습니다.
+`openIfMissing=true` 요청에서 valid target임에도 `TAB_NOT_FOUND`가 나오면 정상 계약 위반입니다. Bridge diagnostics의 실제 `openIfMissing`을 확인합니다.
 
-### Delivery history
+## Browser-control diagnostics
 
-- `0.1.11`: target page heartbeat 의존 → hidden page timeout 가능.
-- `0.1.12`: extension background polling 보강.
-- `0.1.13`: 약 1초 snapshot polling으로 focus-or-open까지 전달했지만 Manifest V3 service worker lifetime에 primary delivery가 의존.
-- `0.1.14`: localhost WebSocket push + keepalive를 primary browser-control transport로 전환.
-
-Snapshot response는 compatibility fallback으로 유지합니다. content watcher heartbeat는 생성 상태 및 legacy focus-only fallback으로 남깁니다.
-
-지원 endpoint:
+Bridge PowerShell과 관리 화면에 동일한 bounded recent diagnostics를 남깁니다.
 
 ```text
-POST /api/tabs/focus
-POST /api/tabs/focus-status
-POST /api/tabs/focus-ack   # extension 전용
-GET  /api/extension/socket # extension WebSocket upgrade
+http://127.0.0.1:43127/
+→ 브라우저 제어 채널 상태
+→ 최근 browser-control 진단
 ```
 
-Consumer marker:
+포함 정보:
+
+- incoming tab hint
+- raw URL / canonical URL
+- `openIfMissing`
+- socket connected
+- request ID
+- push result
+- ACK receive/accept/reject
+- timeout
+
+Extension service-worker DevTools에는 다음 prefix를 사용합니다.
 
 ```text
-X-AIWorkerNotifier-Client: flowduck-adapter
+[AIWorkerNotifier][browser-control]
 ```
 
-Broker는 ChatGPT canonical URL만 다루며 Project ID나 unread 의미를 알지 않습니다.
+주요 event:
 
-## 개인정보 및 데이터 경계
+- `socket-open`, `socket-close`
+- `socket-focus-action-received`
+- `focus-action-queued`
+- `focus-action-resolve`
+- `focus-existing-tab-success`
+- `focus-create-tab-start/success`
+- `focus-ack-send/result`
+- `watcher-injected`
 
-Chrome watcher와 bridge가 사용하는 정보는 다음 범위로 제한합니다.
+진단 로그에도 prompt/response 본문은 포함하지 않습니다.
 
-- Chrome tab ID
-- Chrome window ID
-- 탭 제목
-- ChatGPT URL
-- 생성 중 여부
-- 생성 완료 상태
-- 로컬에서 생성한 turn ID
-- 완료 감지 시각/mode
+## Privacy / security
 
-다음 항목은 읽거나 bridge로 전달하지 않습니다.
+- Bridge는 `127.0.0.1`에만 bind
+- HTTP API는 client marker 사용
+- WebSocket은 extension Origin + subprotocol 검증
+- arbitrary non-ChatGPT URL 거부
+- actual tab query가 create 판단 정본
+- Project mapping/unread 저장 금지
+- prompt/response text 미수집
+- Discord Webhook secret은 기존 DPAPI 저장소 유지
 
-- 응답 본문 `textContent`
-- 코드블록 내용
-- 입력 프롬프트 내용
-- 입력창에 작성 중인 문자열
+## Contract test
 
-입력창의 submit/click/Enter 이벤트는 새 턴 시작을 구분하기 위한 신호로만 사용하며 문자열 내용은 읽지 않습니다.
+```text
+tests/Test-ChatGptProjectInboxBridge.ps1
+```
 
-## 로컬 bridge 보안 경계
+검증:
 
-- `127.0.0.1`에만 바인딩
-- 브라우저 HTTP API는 고정 client marker 요구
-- WebSocket은 extension Origin + 전용 subprotocol 검증
-- 외부 consumer browser action API는 별도 `flowduck-adapter` marker 요구
-- ChatGPT가 아닌 URL은 등록 및 focus-or-open 대상에서 거부
-- snapshot 누락만으로 열린 Chrome 탭을 삭제하지 않음
-- 새 탭 생성 여부는 stale bridge cache가 아니라 actual Chrome query로 결정
-- browser action은 직렬화해 duplicate create race 방지
-- Project mapping/unread 상태는 저장하지 않음
-- 응답 내용과 프롬프트는 bridge로 보내지 않음
-- Discord Webhook secret은 기존 DPAPI 저장소에만 유지
+- Windows PowerShell explicit UTF-8 parse
+- launcher dot-source scope
+- WebSocket handshake/subprotocol/keepalive
+- actual `chrome.tabs.query({})`
+- exact existing-first / no-match create
+- action serialization / request dedupe
+- foreground window
+- structured errors / Bridge diagnostics
+- extension 0.1.15
+- stale content context guard / reinjection markers
 
-## 레거시 userscript
+## 범위 밖
 
-`integrations/chatgpt/chatgpt-completion-watcher.user.js`는 초기 실험 경로로 남아 있을 수 있지만, 현재 기본 통합 경로는 전용 Chrome 확장입니다.
-
-## 현재 범위 밖
-
-- ChatGPT 응답 본문 자동 추출
-- 코드블록 자동 복사
-- 프롬프트 내용 읽기/저장
-- 프롬프트 자동 입력/전송
-- Send 버튼 자동 클릭
-- ChatGPT 내부 API 호출
-- 외부 consumer의 Project mapping/unread 상태 관리
-
-ChatGPT UI의 접근성 라벨이나 `data-testid`가 변경되면 Stop 생성 컨트롤 selector 갱신이 필요할 수 있습니다.
+- response body extraction
+- prompt text read/store
+- automatic prompt submission
+- ChatGPT internal API call
+- Project mapping/unread ownership
