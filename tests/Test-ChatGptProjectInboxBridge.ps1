@@ -21,6 +21,16 @@ function Assert-NotContains {
     if ($Text -match $Pattern) { throw $Message }
 }
 
+function Assert-LiteralContains {
+    param([string]$Text, [string]$Value, [string]$Message)
+    if (-not $Text.Contains($Value)) { throw $Message }
+}
+
+function Assert-LiteralNotContains {
+    param([string]$Text, [string]$Value, [string]$Message)
+    if ($Text.Contains($Value)) { throw $Message }
+}
+
 function Read-And-AssertPowerShellUtf8 {
     param([string]$Path, [string]$Label)
 
@@ -56,8 +66,8 @@ Assert-Contains $launcher "start-chatgpt-bridge\.impl\.ps1" 'Bridge launcher mus
 Assert-Contains $launcher "ReadAllText" 'Bridge launcher must explicitly read the implementation source.'
 Assert-Contains $launcher "UTF8Encoding" 'Bridge launcher must explicitly decode the implementation as UTF-8.'
 Assert-Contains $launcher "ScriptBlock\]::Create" 'Bridge launcher must parse the decoded implementation in memory.'
-Assert-Contains $launcher '(?m)^\. \$scriptBlock -Port \$Port$' 'Bridge launcher must dot-source the implementation so script-scope state remains shared.'
-Assert-NotContains $launcher '(?m)^& \$scriptBlock -Port \$Port$' 'Bridge launcher must not invoke the implementation in a child scope.'
+Assert-LiteralContains $launcher '. $scriptBlock -Port $Port' 'Bridge launcher must dot-source the implementation so script-scope state remains shared.'
+Assert-LiteralNotContains $launcher '& $scriptBlock -Port $Port' 'Bridge launcher must not invoke the implementation in a child scope.'
 
 Assert-Contains $bridge "chatgpt-completions" 'Bridge must persist a bounded ChatGPT completion journal.'
 Assert-Contains $bridge "ai-worker-notifier/chatgpt-completion/v1" 'Bridge completion journal schema is missing.'
