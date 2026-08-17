@@ -11,12 +11,14 @@ ChatGPT 웹 브라우저에서 **응답 생성이 끝났는지 여부만** 감�
 ```text
 여러 ChatGPT 탭
   -> Chrome 확장 content watcher
-     - tab title / URL
+     - tab/window identity / title / URL
      - 생성 중 여부
-     - Stop 생성 컨트롤의 등장/제거
+     - 완료 signal
   -> Chrome 확장 service worker
   -> localhost bridge (127.0.0.1:43127)
-  -> 체크 해제된 탭만 제외
+     - 체크 해제된 탭만 제외
+     - generic completion metadata journal
+     - 기존 탭 focus broker
   -> 완료 이벤트를 ai-task-complete로 큐 등록
   -> 기존 inbox / notifier / Discord
 ```
@@ -84,8 +86,9 @@ Chrome 탭이 실제로 닫히거나 ChatGPT URL을 벗어나면 해당 탭 레�
 현재 Chrome watcher의 핵심 규칙은 다음과 같습니다.
 
 - Stop 생성 컨트롤이 보이면 해당 턴에서 실제 생성 상태를 관찰한 것으로 기록
-- Stop 생성 컨트롤이 DOM에서 제거되거나 숨겨지면 완료 이벤트 전송
-- Mutation을 놓친 경우에만 Stop 컨트롤이 연속 500ms 이상 보이지 않는지 확인 후 보조 완료 처리
+- 생성 중 사용자가 composer를 편집한 직후 Stop이 사라지면 그 소실을 완료로 사용하지 않음
+- 오염되지 않은 Stop 소실은 연속 확인 후 완료 후보로 사용
+- composer 변화로 Stop 소실이 오염되면 최신 assistant turn의 완료 후 Action UI까지 확인한 뒤 완료 처리
 - 한 턴당 완료 이벤트는 한 번만 전송
 - 턴마다 고유 `turnId`를 생성해 bridge의 dispatch ID에 포함
 - 체크 해제된 탭의 완료 이벤트는 bridge에서 무시
@@ -100,16 +103,93 @@ Chrome 탭이 실제로 닫히거나 ChatGPT URL을 벗어나면 해당 탭 레�
 
 이전의 `assistant` 메시지 컨테이너 개수 증가 fallback은 응답 시작 시점에도 조건이 성립할 수 있어 오탐 원인이 되었으므로 제거했습니다.
 
+## Generic completion journal
+
+선택된 ChatGPT 탭에서 완료 이벤트가 발생하면 bridge는 기존 Discord notification queue와 별도로 **generic completion metadata**를 로컬 journal에 기록합니다.
+
+```text
+%LOCALAPPDATA%\AIWorkerNotifier\state\chatgpt-completions\
+```
+
+Schema:
+
+```text
+ai-worker-notifier/chatgpt-completion/v1
+```
+
+저장 정보:
+
+- stable event ID (`tabId + turnId`, turnId가 없으면 감지 시각 fallback)
+- Chrome tab ID
+- Chrome window ID (가능한 경우)
+- 탭 제목
+- ChatGPT URL
+- turn ID
+- 완료 감지 UTC 시각
+- detection mode
+
+journal은 최대 최근 500개 파일로 제한합니다. 동일 stable event ID의 파일이 이미 있으면 중복 기록하지 않습니다.
+
+이 journal은 특정 Project 제품에 종속된 저장소가 아닙니다. 외부 local consumer가 완료 metadata를 읽을 수 있게 하는 Adapter seam이며 AIWorkerNotifier는 Project ID, Project 이름, unread count를 저장하거나 계산하지 않습니다.
+
+## Existing-tab focus broker
+
+Chrome 확장 `0.1.11`부터 bridge는 local consumer가 **현재 열려 있는 ChatGPT 탭을 새 탭 생성 없이 foreground**할 수 있는 최소 broker를 제공합니다.
+
+Flow:
+
+```text
+local consumer
+→ POST /api/tabs/focus
+→ Bridge가 현재 tabId 또는 canonical URL로 열린 탭 검색
+→ focus request queue
+→ 해당 탭의 heartbeat 응답에 focusRequestId 포함
+→ extension background
+   chrome.tabs.update(tabId, { active: true })
+   chrome.windows.update(windowId, { focused: true })
+→ POST /api/tabs/focus-ack
+→ consumer가 /api/tabs/focus-status polling
+```
+
+Consumer marker:
+
+```text
+X-AIWorkerNotifier-Client: flowduck-adapter
+```
+
+지원 endpoint:
+
+```text
+POST /api/tabs/focus
+POST /api/tabs/focus-status
+```
+
+Extension 전용 ack:
+
+```text
+POST /api/tabs/focus-ack
+```
+
+Focus target 선택 순서:
+
+1. 요청한 `tabId`가 아직 열려 있으면 해당 탭
+2. stale tabId라면 canonical ChatGPT URL이 일치하는 현재 열린 탭
+3. 찾지 못하면 `TAB_NOT_FOUND`
+
+Broker는 임의 URL을 새로 열지 않습니다. 탭이 없거나 Chrome focus acknowledgement가 실패/timeout되면 실패 상태만 반환합니다.
+
 ## 개인정보 및 데이터 경계
 
 Chrome watcher와 bridge가 사용하는 정보는 다음 범위로 제한합니다.
 
 - Chrome tab ID
+- Chrome window ID
 - 탭 제목
 - ChatGPT URL
 - 생성 중 여부
 - 생성 완료 상태
 - 로컬에서 생성한 turn ID
+- 완료 감지 시각/mode
 
 다음 항목은 읽거나 bridge로 전달하지 않습니다.
 
@@ -124,8 +204,10 @@ Chrome watcher와 bridge가 사용하는 정보는 다음 범위로 제한합니
 
 - `127.0.0.1`에만 바인딩
 - 브라우저 API는 고정 client marker 요구
+- 외부 consumer focus API는 별도 `flowduck-adapter` marker 요구
 - ChatGPT가 아닌 URL은 탭 등록 거부
 - snapshot 누락만으로 열린 Chrome 탭을 삭제하지 않음
+- focus broker는 현재 bridge가 알고 있는 ChatGPT 탭만 대상으로 함
 - 응답 내용과 프롬프트는 bridge로 보내지 않음
 - Discord Webhook secret은 기존 DPAPI 저장소에만 유지
 
@@ -143,5 +225,6 @@ Chrome watcher와 bridge가 사용하는 정보는 다음 범위로 제한합니
 - 프롬프트 자동 입력/전송
 - Send 버튼 자동 클릭
 - ChatGPT 내부 API 호출
+- 외부 consumer의 Project mapping/unread 상태 관리
 
 ChatGPT UI의 접근성 라벨이나 `data-testid`가 변경되면 Stop 생성 컨트롤 selector 갱신이 필요할 수 있습니다.
