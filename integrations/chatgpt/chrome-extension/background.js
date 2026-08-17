@@ -3,6 +3,7 @@ const SNAPSHOT_URL = `${BRIDGE_BASE}/api/tabs/snapshot`;
 const REMOVE_URL = `${BRIDGE_BASE}/api/tabs/remove`;
 const HEARTBEAT_URL = `${BRIDGE_BASE}/api/tabs/heartbeat`;
 const COMPLETION_URL = `${BRIDGE_BASE}/api/tabs/completed`;
+const FOCUS_ACK_URL = `${BRIDGE_BASE}/api/tabs/focus-ack`;
 const SNAPSHOT_MIN_INTERVAL_MS = 2000;
 const ALARM_NAME = 'ai-worker-notifier-chatgpt-tab-sync';
 
@@ -40,6 +41,7 @@ function toSnapshotTab(tab) {
   if (!tab || !Number.isInteger(tab.id) || !isChatGptUrl(tab.url)) return null;
   return {
     tabId: `chrome-${tab.id}`,
+    windowId: Number.isInteger(tab.windowId) ? tab.windowId : null,
     title: tab.title || 'ChatGPT',
     url: tab.url
   };
@@ -80,6 +82,29 @@ async function syncOpenChatGptTabs({ force = false, inject = false } = {}) {
   } finally {
     syncInFlight = false;
   }
+}
+
+async function applyFocusRequest(tab, requestId) {
+  if (!requestId || !tab || !Number.isInteger(tab.id)) return;
+
+  let success = false;
+  let error = '';
+  try {
+    await chrome.tabs.update(tab.id, { active: true });
+    if (Number.isInteger(tab.windowId)) {
+      await chrome.windows.update(tab.windowId, { focused: true });
+    }
+    success = true;
+  } catch (reason) {
+    error = String(reason?.message || reason || 'Chrome tab focus failed');
+  }
+
+  await postJson(FOCUS_ACK_URL, {
+    requestId,
+    tabId: `chrome-${tab.id}`,
+    success,
+    error
+  });
 }
 
 function ensureFallbackAlarm() {
@@ -147,15 +172,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     postJson(HEARTBEAT_URL, {
       tabId: `chrome-${tab.id}`,
+      windowId: Number.isInteger(tab.windowId) ? tab.windowId : null,
       title: tab.title || message.title || 'ChatGPT',
       url: tab.url,
       generating: Boolean(message.generating)
     }).then(async (response) => {
       let selected = false;
+      let focusRequestId = '';
       if (response?.ok) {
         try {
-          selected = (await response.json()).selected === true;
+          const payload = await response.json();
+          selected = payload.selected === true;
+          focusRequestId = typeof payload.focusRequestId === 'string'
+            ? payload.focusRequestId
+            : '';
         } catch (_) {}
+      }
+      if (focusRequestId) {
+        await applyFocusRequest(tab, focusRequestId);
       }
       sendResponse({ selected });
     });
@@ -165,6 +199,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === 'completed') {
     postJson(COMPLETION_URL, {
       tabId: `chrome-${tab.id}`,
+      windowId: Number.isInteger(tab.windowId) ? tab.windowId : null,
       title: tab.title || message.title || 'ChatGPT',
       url: tab.url,
       turnId: typeof message.turnId === 'string' ? message.turnId : '',
