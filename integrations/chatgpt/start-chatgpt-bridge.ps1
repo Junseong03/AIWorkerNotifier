@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
     [ValidateRange(1024, 65535)]
     [int]$Port = 43127
@@ -21,10 +21,16 @@ $completionJournalRoot = Join-Path $stateRoot 'chatgpt-completions'
 $legacyTabTtlSeconds = 30
 $completionJournalLimit = 500
 $focusRequestTtlSeconds = 15
+$focusSocketProtocol = 'ai-worker-notifier-chatgpt-v1'
+$focusSocketKeepAliveSeconds = 20
 $tabs = @{}
 $disabledTabs = @{}
 $focusRequestsByTab = @{}
 $focusStatusById = @{}
+$focusSocketClient = $null
+$focusSocketStream = $null
+$focusSocketVersion = ''
+$focusSocketLastWriteUtc = [DateTime]::MinValue
 
 if (-not (Test-Path -LiteralPath $aiTaskComplete)) {
     throw "ai-task-complete 진입점을 찾을 수 없습니다: $aiTaskComplete"
@@ -235,6 +241,13 @@ function Get-ManagementHtml {
         $rows -join "`n"
     }
 
+    $socketState = if ($null -ne $focusSocketStream) {
+        "연결됨 (extension $focusSocketVersion)"
+    }
+    else {
+        '연결 안 됨'
+    }
+
     return @"
 <!doctype html>
 <html lang="ko">
@@ -250,6 +263,7 @@ body{font-family:Segoe UI,Malgun Gothic,sans-serif;max-width:980px;margin:40px a
 <body>
 <h1>ChatGPT 탭 감시</h1>
 <p class="hint">새로 감지된 ChatGPT 탭은 기본적으로 알림 ON입니다. 알림을 받지 않을 탭만 체크 해제하세요. 목록은 약 5초마다 갱신됩니다.</p>
+<p class="hint">브라우저 제어 채널: $(HtmlEncode $socketState)</p>
 <form method="POST" action="/manage/select" class="panel">
 $listHtml
 <div class="actions"><button class="primary" type="submit">선택 저장</button><span>체크 해제한 탭의 완료 이벤트만 무시됩니다.</span></div>
@@ -347,6 +361,122 @@ function Read-HttpRequest {
         Headers = $headers
         Body = $body
     }
+}
+
+function Close-ExtensionFocusSocket {
+    if ($null -ne $script:focusSocketClient) {
+        try { $script:focusSocketClient.Close() } catch { }
+    }
+    $script:focusSocketClient = $null
+    $script:focusSocketStream = $null
+    $script:focusSocketVersion = ''
+    $script:focusSocketLastWriteUtc = [DateTime]::MinValue
+}
+
+function Write-WebSocketTextFrame {
+    param(
+        [IO.Stream]$Stream,
+        [string]$Text
+    )
+
+    $payload = $utf8.GetBytes($Text)
+    if ($payload.Length -gt 65535) { throw 'WebSocket payload too large' }
+
+    $header = New-Object Collections.Generic.List[byte]
+    $header.Add([byte]0x81)
+    if ($payload.Length -le 125) {
+        $header.Add([byte]$payload.Length)
+    }
+    else {
+        $header.Add([byte]126)
+        $header.Add([byte](($payload.Length -shr 8) -band 0xff))
+        $header.Add([byte]($payload.Length -band 0xff))
+    }
+
+    $headerBytes = $header.ToArray()
+    $Stream.Write($headerBytes, 0, $headerBytes.Length)
+    if ($payload.Length -gt 0) { $Stream.Write($payload, 0, $payload.Length) }
+    $Stream.Flush()
+}
+
+function Send-FocusSocketPayload {
+    param($Payload)
+
+    if ($null -eq $script:focusSocketStream) { return $false }
+    try {
+        $json = $Payload | ConvertTo-Json -Compress -Depth 5
+        Write-WebSocketTextFrame -Stream $script:focusSocketStream -Text $json
+        $script:focusSocketLastWriteUtc = [DateTime]::UtcNow
+        return $true
+    }
+    catch {
+        Close-ExtensionFocusSocket
+        return $false
+    }
+}
+
+function Send-FocusSocketKeepAlive {
+    if ($null -eq $script:focusSocketStream) { return }
+    if (([DateTime]::UtcNow - $script:focusSocketLastWriteUtc).TotalSeconds -lt $focusSocketKeepAliveSeconds) {
+        return
+    }
+    [void](Send-FocusSocketPayload ([ordered]@{
+        type = 'keepalive'
+        sentAtUtc = [DateTime]::UtcNow.ToString('o')
+    }))
+}
+
+function Accept-ExtensionFocusSocket {
+    param(
+        $Client,
+        [IO.Stream]$Stream,
+        $Request,
+        [string]$Target
+    )
+
+    if ($Target -notmatch '^/api/extension/socket\?version=([0-9A-Za-z._-]+)$') { return $false }
+    $version = [Uri]::UnescapeDataString($Matches[1])
+    $upgrade = if ($Request.Headers.ContainsKey('Upgrade')) { [string]$Request.Headers['Upgrade'] } else { '' }
+    $key = if ($Request.Headers.ContainsKey('Sec-WebSocket-Key')) { [string]$Request.Headers['Sec-WebSocket-Key'] } else { '' }
+    $protocols = if ($Request.Headers.ContainsKey('Sec-WebSocket-Protocol')) { [string]$Request.Headers['Sec-WebSocket-Protocol'] } else { '' }
+    $origin = if ($Request.Headers.ContainsKey('Origin')) { [string]$Request.Headers['Origin'] } else { '' }
+
+    if ($upgrade.ToLowerInvariant() -ne 'websocket') { throw 'invalid WebSocket upgrade request' }
+    if ([string]::IsNullOrWhiteSpace($key)) { throw 'missing Sec-WebSocket-Key' }
+    if ($origin -notmatch '^chrome-extension://[a-p]{32}$') { throw 'invalid extension WebSocket origin' }
+    $requestedProtocols = @($protocols -split ',' | ForEach-Object { $_.Trim() })
+    if ($requestedProtocols -notcontains $focusSocketProtocol) { throw 'unsupported WebSocket subprotocol' }
+
+    $sha1 = [Security.Cryptography.SHA1]::Create()
+    try {
+        $acceptSource = $key.Trim() + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
+        $acceptBytes = $sha1.ComputeHash([Text.Encoding]::ASCII.GetBytes($acceptSource))
+        $acceptValue = [Convert]::ToBase64String($acceptBytes)
+    }
+    finally {
+        $sha1.Dispose()
+    }
+
+    $response = @(
+        'HTTP/1.1 101 Switching Protocols'
+        'Upgrade: websocket'
+        'Connection: Upgrade'
+        "Sec-WebSocket-Accept: $acceptValue"
+        "Sec-WebSocket-Protocol: $focusSocketProtocol"
+        ''
+        ''
+    ) -join "`r`n"
+    $bytes = [Text.Encoding]::ASCII.GetBytes($response)
+    $Stream.Write($bytes, 0, $bytes.Length)
+    $Stream.Flush()
+
+    Close-ExtensionFocusSocket
+    $script:focusSocketClient = $Client
+    $script:focusSocketStream = $Stream
+    $script:focusSocketVersion = Limit-Text $version 40
+    $script:focusSocketLastWriteUtc = [DateTime]::UtcNow
+    Write-Host ("[{0}] Chrome extension browser-control channel connected: {1}" -f (Get-Date -Format 'HH:mm:ss'), $script:focusSocketVersion)
+    return $true
 }
 
 function Parse-JsonBody {
@@ -496,13 +626,27 @@ function Queue-FocusRequest {
     }
     $focusStatusById[$requestId] = $status
 
-    # openIfMissing 요청은 실제 전체 Chrome tab query가 최종 판정한다.
-    # 캐시된 tabId heartbeat로 먼저 처리하면 stale snapshot이 새 동작을 우회할 수 있으므로
-    # 기존 focus-only 요청만 tab heartbeat fallback map에 넣는다.
+    # focus-only 레거시 경로는 기존 tab heartbeat fallback을 유지한다.
     if (-not $OpenIfMissing -and $null -ne $tab) {
         $focusRequestsByTab[[string]$tab.TabId] = $requestId
     }
     return $status
+}
+
+function Get-FocusSocketAction {
+    param($Status)
+    return [ordered]@{
+        type = 'focus-or-open'
+        focusRequestId = [string]$Status.RequestId
+        preferredTabId = [string]$Status.TabId
+        targetUrl = [string]$Status.TargetUrl
+        openIfMissing = [bool]$Status.OpenIfMissing
+    }
+}
+
+function Push-FocusRequestToExtension {
+    param($Status)
+    return Send-FocusSocketPayload (Get-FocusSocketAction $Status)
 }
 
 function Get-PendingOpenFocusRequest {
@@ -564,11 +708,20 @@ $listener.Start()
 Write-Host "ChatGPT tab manager: http://127.0.0.1:$Port/"
 Write-Host '새로 감지된 ChatGPT 탭은 기본 알림 ON이며, 체크 해제한 탭만 제외합니다.'
 Write-Host 'Chrome 탭 이벤트 + 비파괴 snapshot으로 감시 목록을 유지합니다.'
+Write-Host '브라우저 focus/open은 Chrome extension WebSocket push channel로 전달합니다.'
 Write-Host '응답 내용과 프롬프트는 수집하지 않습니다. 종료: Ctrl+C'
 
 try {
     while ($true) {
+        Send-FocusSocketKeepAlive
+        if (-not $listener.Pending()) {
+            Start-Sleep -Milliseconds 50
+            continue
+        }
+
         $client = $listener.AcceptTcpClient()
+        $keepClientOpen = $false
+        $stream = $null
         try {
             $client.ReceiveTimeout = 5000
             $client.SendTimeout = 5000
@@ -587,6 +740,22 @@ try {
                 $clientMarker = [string]$request.Headers['X-AIWorkerNotifier-Client']
             }
             $body = [string]$request.Body
+
+            if ($method -eq 'GET' -and $target -like '/api/extension/socket?*') {
+                try {
+                    if (Accept-ExtensionFocusSocket -Client $client -Stream $stream -Request $request -Target $target) {
+                        $keepClientOpen = $true
+                        $pending = Get-PendingOpenFocusRequest
+                        if ($null -ne $pending) { [void](Push-FocusRequestToExtension $pending) }
+                        continue
+                    }
+                }
+                catch {
+                    Write-HttpResponse $stream 400 'Bad Request'
+                    Write-Warning ("Extension WebSocket handshake failed: {0}" -f $_.Exception.Message)
+                    continue
+                }
+            }
 
             if ($method -eq 'GET' -and ($target -eq '/' -or $target -eq '/manage')) {
                 Write-HttpResponse $stream 200 'OK' (Get-ManagementHtml) 'text/html; charset=utf-8'
@@ -628,6 +797,18 @@ try {
                         Write-HttpResponse $stream 404 'Not Found' '{"code":"TAB_NOT_FOUND"}' 'application/json; charset=utf-8'
                         continue
                     }
+
+                    if ($status.OpenIfMissing -eq $true -and -not (Push-FocusRequestToExtension $status)) {
+                        $status.Status = 'failed'
+                        $status.Error = 'Chrome extension browser-control channel is unavailable.'
+                        $response = @{
+                            code = 'EXTENSION_CHANNEL_UNAVAILABLE'
+                            message = 'Chrome 확장 제어 채널이 연결되지 않았습니다. AIWorkerNotifier ChatGPT Watcher 0.1.14를 새로고침한 뒤 다시 시도하세요.'
+                        } | ConvertTo-Json -Compress
+                        Write-HttpResponse $stream 503 'Service Unavailable' $response 'application/json; charset=utf-8'
+                        continue
+                    }
+
                     $response = @{
                         requestId = $status.RequestId
                         tabId = $status.TabId
@@ -779,14 +960,17 @@ try {
             Write-HttpResponse $stream 404 'Not Found'
         }
         catch {
-            try { Write-HttpResponse $stream 500 'Internal Server Error' } catch { }
+            if ($null -ne $stream) {
+                try { Write-HttpResponse $stream 500 'Internal Server Error' } catch { }
+            }
             Write-Warning ("Bridge request failed: {0}" -f $_.Exception.Message)
         }
         finally {
-            $client.Close()
+            if (-not $keepClientOpen) { $client.Close() }
         }
     }
 }
 finally {
+    Close-ExtensionFocusSocket
     $listener.Stop()
 }
