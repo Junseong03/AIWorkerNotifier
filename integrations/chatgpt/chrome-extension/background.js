@@ -4,14 +4,16 @@ const REMOVE_URL = `${BRIDGE_BASE}/api/tabs/remove`;
 const HEARTBEAT_URL = `${BRIDGE_BASE}/api/tabs/heartbeat`;
 const COMPLETION_URL = `${BRIDGE_BASE}/api/tabs/completed`;
 const FOCUS_ACK_URL = `${BRIDGE_BASE}/api/tabs/focus-ack`;
+const FOCUS_SOCKET_BASE = 'ws://127.0.0.1:43127/api/extension/socket';
+const FOCUS_SOCKET_PROTOCOL = 'ai-worker-notifier-chatgpt-v1';
+const FOCUS_SOCKET_RECONNECT_MS = 1000;
 const SNAPSHOT_MIN_INTERVAL_MS = 2000;
-const FOCUS_POLL_INTERVAL_MS = 1000;
 const ALARM_NAME = 'ai-worker-notifier-chatgpt-tab-sync';
 
 let syncInFlight = false;
-let focusPollInFlight = false;
 let lastSnapshotAt = 0;
-let focusPollIntervalId = null;
+let focusSocket = null;
+let focusSocketReconnectTimer = null;
 const generatingByTab = new Map();
 const focusRequestsInFlight = new Set();
 
@@ -93,26 +95,30 @@ async function readFocusRequestId(response) {
   }
 }
 
+function toBrowserFocusAction(payload) {
+  if (
+    !payload ||
+    typeof payload.focusRequestId !== 'string' ||
+    payload.focusRequestId.length === 0 ||
+    typeof payload.targetUrl !== 'string' ||
+    canonicalChatGptUrl(payload.targetUrl) === ''
+  ) {
+    return null;
+  }
+  return {
+    requestId: payload.focusRequestId,
+    preferredTabId: typeof payload.preferredTabId === 'string'
+      ? payload.preferredTabId
+      : '',
+    targetUrl: payload.targetUrl,
+    openIfMissing: payload.openIfMissing === true
+  };
+}
+
 async function readBrowserFocusAction(response) {
   if (!response?.ok || response.status === 204) return null;
   try {
-    const payload = await response.json();
-    if (
-      typeof payload.focusRequestId !== 'string' ||
-      payload.focusRequestId.length === 0 ||
-      typeof payload.targetUrl !== 'string' ||
-      canonicalChatGptUrl(payload.targetUrl) === ''
-    ) {
-      return null;
-    }
-    return {
-      requestId: payload.focusRequestId,
-      preferredTabId: typeof payload.preferredTabId === 'string'
-        ? payload.preferredTabId
-        : '',
-      targetUrl: payload.targetUrl,
-      openIfMissing: payload.openIfMissing === true
-    };
+    return toBrowserFocusAction(await response.json());
   } catch (_) {
     return null;
   }
@@ -264,6 +270,65 @@ async function applyBrowserFocusAction(action, allTabs) {
   }
 }
 
+function scheduleFocusSocketReconnect() {
+  if (focusSocketReconnectTimer !== null) return;
+  focusSocketReconnectTimer = setTimeout(() => {
+    focusSocketReconnectTimer = null;
+    ensureFocusSocket();
+  }, FOCUS_SOCKET_RECONNECT_MS);
+}
+
+function ensureFocusSocket() {
+  if (
+    focusSocket &&
+    (focusSocket.readyState === WebSocket.OPEN ||
+      focusSocket.readyState === WebSocket.CONNECTING)
+  ) {
+    return;
+  }
+
+  const version = encodeURIComponent(chrome.runtime.getManifest().version);
+  let socket;
+  try {
+    socket = new WebSocket(
+      `${FOCUS_SOCKET_BASE}?version=${version}`,
+      FOCUS_SOCKET_PROTOCOL
+    );
+  } catch (_) {
+    scheduleFocusSocketReconnect();
+    return;
+  }
+  focusSocket = socket;
+
+  socket.onopen = () => {
+    if (focusSocket !== socket) return;
+    syncOpenChatGptTabs({ force: true, inject: false }).catch(() => {});
+  };
+
+  socket.onmessage = (event) => {
+    if (focusSocket !== socket || typeof event.data !== 'string') return;
+    let payload;
+    try {
+      payload = JSON.parse(event.data);
+    } catch (_) {
+      return;
+    }
+    if (payload?.type === 'keepalive') return;
+    if (payload?.type !== 'focus-or-open') return;
+    const action = toBrowserFocusAction(payload);
+    if (!action) return;
+    chrome.tabs.query({})
+      .then((allTabs) => applyBrowserFocusAction(action, allTabs))
+      .catch(() => {});
+  };
+
+  socket.onerror = () => {};
+  socket.onclose = () => {
+    if (focusSocket === socket) focusSocket = null;
+    scheduleFocusSocketReconnect();
+  };
+}
+
 async function injectWatcher(tabId) {
   try {
     await chrome.scripting.executeScript({
@@ -292,6 +357,8 @@ async function syncOpenChatGptTabs({ force = false, inject = false } = {}) {
     const response = await postJson(SNAPSHOT_URL, { tabs: snapshot });
     lastSnapshotAt = Date.now();
 
+    // Snapshot response remains a compatibility fallback. Normal focus delivery
+    // is pushed over the persistent localhost WebSocket channel.
     const focusAction = await readBrowserFocusAction(response);
     if (focusAction) {
       await applyBrowserFocusAction(focusAction, allTabs);
@@ -338,62 +405,45 @@ async function applyFocusRequest(tab, requestId) {
   }
 }
 
-async function pollFocusRequests() {
-  if (focusPollInFlight) return;
-  focusPollInFlight = true;
-  try {
-    await syncOpenChatGptTabs({ force: true, inject: false });
-  } finally {
-    focusPollInFlight = false;
-  }
-}
-
-function ensureFocusPoller() {
-  if (focusPollIntervalId !== null) return;
-  focusPollIntervalId = setInterval(() => {
-    pollFocusRequests().catch(() => {});
-  }, FOCUS_POLL_INTERVAL_MS);
-  pollFocusRequests().catch(() => {});
-}
-
 function ensureFallbackAlarm() {
-  chrome.alarms.create(ALARM_NAME, { periodInMinutes: 1 });
+  chrome.alarms.create(ALARM_NAME, { periodInMinutes: 0.5 });
 }
 
 chrome.runtime.onInstalled.addListener(() => {
   ensureFallbackAlarm();
-  ensureFocusPoller();
+  ensureFocusSocket();
   syncOpenChatGptTabs({ force: true, inject: true }).catch(() => {});
 });
 
 chrome.runtime.onStartup.addListener(() => {
   ensureFallbackAlarm();
-  ensureFocusPoller();
+  ensureFocusSocket();
   syncOpenChatGptTabs({ force: true, inject: true }).catch(() => {});
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name !== ALARM_NAME) return;
-  ensureFocusPoller();
+  ensureFocusSocket();
   syncOpenChatGptTabs({ force: true, inject: false }).catch(() => {});
 });
 
 chrome.tabs.onCreated.addListener(() => {
-  ensureFocusPoller();
+  ensureFocusSocket();
   syncOpenChatGptTabs({ force: true, inject: false }).catch(() => {});
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  ensureFocusSocket();
   removeTrackedTab(tabId).catch(() => {});
 });
 
 chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
+  ensureFocusSocket();
   generatingByTab.delete(removedTabId);
   removeTrackedTab(removedTabId).catch(() => {});
   chrome.tabs.get(addedTabId)
     .then((tab) => {
       if (isChatGptUrl(tab.url)) {
-        ensureFocusPoller();
         syncOpenChatGptTabs({ force: true, inject: true }).catch(() => {});
       }
     })
@@ -401,6 +451,7 @@ chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  ensureFocusSocket();
   if (changeInfo.url && !isChatGptUrl(changeInfo.url)) {
     generatingByTab.delete(tabId);
     removeTrackedTab(tabId).catch(() => {});
@@ -408,7 +459,6 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   }
 
   if (changeInfo.url || changeInfo.title || changeInfo.status === 'complete') {
-    ensureFocusPoller();
     syncOpenChatGptTabs({ force: true, inject: false }).catch(() => {});
   }
   if (isChatGptUrl(tab.url) && changeInfo.status === 'complete') {
@@ -417,17 +467,17 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 });
 
 chrome.tabs.onActivated.addListener(() => {
-  ensureFocusPoller();
+  ensureFocusSocket();
   syncOpenChatGptTabs({ force: true, inject: false }).catch(() => {});
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  ensureFocusSocket();
   const tab = sender.tab;
   if (!tab || !Number.isInteger(tab.id) || !isChatGptUrl(tab.url)) return;
 
   if (message?.type === 'heartbeat') {
     generatingByTab.set(tab.id, Boolean(message.generating));
-    ensureFocusPoller();
     syncOpenChatGptTabs({ force: false, inject: false }).catch(() => {});
 
     postJson(
@@ -468,5 +518,5 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 ensureFallbackAlarm();
-ensureFocusPoller();
+ensureFocusSocket();
 syncOpenChatGptTabs({ force: true, inject: true }).catch(() => {});
