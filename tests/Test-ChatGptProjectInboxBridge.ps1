@@ -86,7 +86,10 @@ Assert-Contains $bridge "type = 'focus-or-open'" 'Bridge must push typed focus-o
 Assert-Contains $bridge "EXTENSION_CHANNEL_UNAVAILABLE" 'Bridge must fail fast when the browser control channel is unavailable.'
 Assert-Contains $bridge "INVALID_TARGET_URL" 'Bridge must distinguish an invalid current-session URL from a missing tab.'
 Assert-Contains $bridge "focusDebugEntries" 'Bridge must retain bounded browser-control diagnostics.'
-Assert-Contains $bridge "최근 browser-control 진단" 'Bridge management page must surface browser-control diagnostics.'
+# Keep contract markers ASCII-only because Windows PowerShell 5.1 can decode
+# UTF-8-without-BOM script literals using the legacy system code page.
+Assert-LiteralContains $bridge '<section class="panel diag"><strong>' 'Bridge management page must surface browser-control diagnostics.'
+Assert-LiteralContains $bridge '$(HtmlEncode $focusDebugText)</pre></section>' 'Bridge management page must render the browser-control diagnostic buffer.'
 Assert-Contains $bridge "focus request tab=" 'Bridge must log the incoming focus-or-open contract.'
 Assert-Contains $bridge "focus ACK received" 'Bridge must log extension acknowledgements.'
 Assert-Contains $bridge "focusSocketKeepAliveSeconds = 20" 'Bridge WebSocket keepalive must remain inside the MV3 idle window.'
