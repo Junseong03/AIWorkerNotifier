@@ -10,12 +10,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from .common import (
-    FOCUS_KEEPALIVE_SECONDS,
-    STATUS_SCHEMA,
-    canonical_chatgpt_url,
-    utc_iso,
-)
+from .common import FOCUS_KEEPALIVE_SECONDS, STATUS_SCHEMA, utc_iso
+from .selftest import run_self_test
 from .server import BridgeHTTPServer
 from .state import BridgeState
 
@@ -82,19 +78,6 @@ def probe_existing_bridge(port: int) -> dict[str, Any] | None:
     return None
 
 
-def self_test() -> int:
-    assert canonical_chatgpt_url(
-        "https://www.chatgpt.com/c/abc/?x=1#y"
-    ) == "https://chatgpt.com/c/abc"
-    assert canonical_chatgpt_url(
-        "https://chat.openai.com/c/abc"
-    ) == "https://chatgpt.com/c/abc"
-    assert canonical_chatgpt_url("http://chatgpt.com/c/abc") == ""
-    assert canonical_chatgpt_url("https://example.com/c/abc") == ""
-    print("PASS: Python ChatGPT bridge self-test")
-    return 0
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="AIWorkerNotifier ChatGPT localhost bridge"
@@ -105,7 +88,7 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.self_test:
-        return self_test()
+        return run_self_test()
     if sys.version_info < (3, 10):
         print("ChatGPT bridge requires Python 3.10+.", file=sys.stderr)
         return 2
