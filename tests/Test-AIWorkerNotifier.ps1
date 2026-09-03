@@ -131,12 +131,11 @@ Write-Host 'PASS: UTF-8 JSON round-trip'
 # ---------------------------------------------------------------------------
 $messageRuntime = Join-Path $env:TEMP ('AIWorkerNotifier-message-test-' + [Guid]::NewGuid().ToString('N'))
 try {
+    $liveMessage = "지금 5초 내로 Pair 버튼을 눌러 주세요.`n완료되면 그대로 진행합니다."
     & $notifyCli `
-        -Message '실기기 확인이 필요합니다.' `
-        -Title '사용자 확인 필요' `
+        -Message $liveMessage `
         -Project 'FlowDuck' `
-        -Severity 'warning' `
-        -AgentRole 'LOCAL_COORDINATOR' `
+        -Agent 'ChatGPT' `
         -RuntimeRoot $messageRuntime
 
     $messageFile = Get-ChildItem -LiteralPath (Join-Path $messageRuntime 'inbox') -Filter '*.json' -File |
@@ -144,8 +143,9 @@ try {
     Assert-True ($null -ne $messageFile) 'ai-notify event file missing'
     $messageEvent = ([IO.File]::ReadAllText($messageFile.FullName, [Text.UTF8Encoding]::new($false))) | ConvertFrom-Json
     Assert-True ($messageEvent.eventType -eq 'message') 'ai-notify eventType mismatch'
-    Assert-True ($messageEvent.title -eq '사용자 확인 필요') 'ai-notify title mismatch'
-    Assert-True ($messageEvent.message -eq '실기기 확인이 필요합니다.') 'ai-notify message mismatch'
+    Assert-True ([string]::IsNullOrWhiteSpace([string]$messageEvent.title)) 'ai-notify default title must be empty'
+    Assert-True ($messageEvent.message -eq $liveMessage) 'ai-notify must preserve message line breaks'
+    Assert-True ($messageEvent.agentRole -eq 'ChatGPT') 'ai-notify -Agent alias mismatch'
     Assert-True ($messageEvent.completionKey -like 'message|*') 'ai-notify completion key must be unique message key'
 
     & $notifierInternal -DryRun -Once -Backlog -RuntimeRoot $messageRuntime | Out-Null
@@ -153,12 +153,14 @@ try {
         (Join-Path $messageRuntime 'logs\notifier.log'),
         [Text.UTF8Encoding]::new($false)
     )
-    Assert-True ($dryRunLog.Contains('사용자 확인 필요')) 'message title missing from delivery dry-run'
-    Assert-True ($dryRunLog.Contains('실기기 확인이 필요합니다.')) 'message body missing from delivery dry-run'
-    Assert-True ($dryRunLog.Contains('Project: FlowDuck')) 'message project missing from delivery dry-run'
-    Assert-True ($dryRunLog.Contains('Agent: LOCAL_COORDINATOR')) 'message agent role missing from delivery dry-run'
+    Assert-True ($dryRunLog.Contains('지금 5초 내로 Pair 버튼을 눌러 주세요.')) 'message first line missing from delivery dry-run'
+    Assert-True ($dryRunLog.Contains('완료되면 그대로 진행합니다.')) 'message second line missing from delivery dry-run'
+    Assert-True ($dryRunLog.Contains('```text')) 'message metadata code block missing'
+    Assert-True ($dryRunLog.Contains('Project: FlowDuck')) 'message project missing from metadata block'
+    Assert-True ($dryRunLog.Contains('Agent: ChatGPT')) 'message agent missing from metadata block'
+    Assert-True (-not $dryRunLog.Contains('AI 작업 메시지')) 'default message header must not be injected'
     Assert-True (-not $dryRunLog.Contains('Task:')) 'message delivery must not use completion Task format'
-    Write-Host 'PASS: ai-notify message queue + delivery formatting'
+    Write-Host 'PASS: ai-notify conversational body + metadata block formatting'
 } finally {
     Remove-Item -LiteralPath $messageRuntime -Recurse -Force -ErrorAction SilentlyContinue
 }

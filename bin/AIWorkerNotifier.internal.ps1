@@ -73,6 +73,24 @@ function Sanitize-Text {
     return Limit-Text $text $MaxLength
 }
 
+function Sanitize-MessageText {
+    param([AllowNull()][string]$Value, [int]$MaxLength)
+    if ([string]::IsNullOrWhiteSpace($Value)) { return '' }
+    $text = $Value.Replace("`r`n", "`n").Replace("`r", "`n").Trim()
+    $patterns = @(
+        '(?i)Authorization\s*:',
+        '(?i)Bearer\s+[A-Za-z0-9._~+/=-]+',
+        '(?i)(token|secret|pepper|password|private\s+key)\s*[:=]\s*\S+',
+        '(?i)https://[^\s/]+/api/webhooks/\S+',
+        '(?i)[A-Za-z]:\\[^\s]+'
+    )
+    foreach ($pattern in $patterns) {
+        $text = [regex]::Replace($text, $pattern, '[REDACTED]')
+    }
+    if ($text.Length -gt $MaxLength) { $text = $text.Substring(0, $MaxLength) }
+    return $text
+}
+
 function Get-WebhookUrl {
     $envWebhook = [Environment]::GetEnvironmentVariable('AI_WORKER_NOTIFIER_WEBHOOK_URL', 'Process')
     if ([string]::IsNullOrWhiteSpace($envWebhook)) {
@@ -159,25 +177,35 @@ function Get-DiscordMessage {
 
     $eventType = (Get-OptionalEventText $Event 'eventType').ToLowerInvariant()
     if ($eventType -eq 'message') {
-        $severity = (Get-OptionalEventText $Event 'severity').ToLowerInvariant()
-        $icon = switch ($severity) {
-            'warning' { '⚠️' }
-            'error' { '❌' }
-            default { '💬' }
-        }
         $title = Sanitize-Text (Get-OptionalEventText $Event 'title') 120
-        $message = Sanitize-Text (Get-OptionalEventText $Event 'message') 1400
+        $message = Sanitize-MessageText (Get-OptionalEventText $Event 'message') 1400
         $project = Sanitize-Text ([string]$Event.project) 120
         $role = Sanitize-Text (Get-OptionalEventText $Event 'agentRole') 80
-        if ([string]::IsNullOrWhiteSpace($title)) { $title = 'AI 작업 메시지' }
-        if ([string]::IsNullOrWhiteSpace($message)) { $message = Sanitize-Text ([string]$Event.summary) 1400 }
+        if ([string]::IsNullOrWhiteSpace($message)) {
+            $message = Sanitize-MessageText ([string]$Event.summary) 1400
+        }
 
         $lines = [System.Collections.Generic.List[string]]::new()
-        $lines.Add("$icon $title")
-        $lines.Add('')
+        if (-not [string]::IsNullOrWhiteSpace($title)) {
+            $lines.Add("**$title**")
+            $lines.Add('')
+        }
         $lines.Add($message)
-        if (-not [string]::IsNullOrWhiteSpace($project)) { $lines.Add("Project: $project") }
-        if (-not [string]::IsNullOrWhiteSpace($role)) { $lines.Add("Agent: $role") }
+
+        if (
+            -not [string]::IsNullOrWhiteSpace($project) -or
+            -not [string]::IsNullOrWhiteSpace($role)
+        ) {
+            $lines.Add('')
+            $lines.Add('```text')
+            if (-not [string]::IsNullOrWhiteSpace($project)) {
+                $lines.Add("Project: $($project.Replace('`', "'"))")
+            }
+            if (-not [string]::IsNullOrWhiteSpace($role)) {
+                $lines.Add("Agent: $($role.Replace('`', "'"))")
+            }
+            $lines.Add('```')
+        }
         return ($lines -join "`n")
     }
 

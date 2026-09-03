@@ -3,13 +3,14 @@ param(
     [Parameter(Mandatory = $true, Position = 0)]
     [string]$Message,
 
-    [string]$Title = 'AI 작업 메시지',
+    [string]$Title = '',
 
     [string]$Project = '',
 
     [ValidateSet('info', 'warning', 'error')]
     [string]$Severity = 'info',
 
+    [Alias('Agent')]
     [string]$AgentRole = '',
 
     [string]$Source = 'agent-cli',
@@ -29,6 +30,14 @@ function Limit-Text {
     param([AllowNull()][string]$Value, [int]$MaxLength)
     if ([string]::IsNullOrWhiteSpace($Value)) { return '' }
     $clean = ($Value -replace "[\r\n\t]+", ' ').Trim()
+    if ($clean.Length -le $MaxLength) { return $clean }
+    return $clean.Substring(0, $MaxLength)
+}
+
+function Limit-MessageText {
+    param([AllowNull()][string]$Value, [int]$MaxLength)
+    if ([string]::IsNullOrWhiteSpace($Value)) { return '' }
+    $clean = $Value.Replace("`r`n", "`n").Replace("`r", "`n").Trim()
     if ($clean.Length -le $MaxLength) { return $clean }
     return $clean.Substring(0, $MaxLength)
 }
@@ -81,8 +90,7 @@ try {
     $eventId = [Guid]::NewGuid().ToString()
     $createdAtUtc = [DateTime]::UtcNow.ToString('o')
     $cleanTitle = Limit-Text $Title 120
-    $cleanMessage = Limit-Text $Message 1400
-    if ([string]::IsNullOrWhiteSpace($cleanTitle)) { $cleanTitle = 'AI 작업 메시지' }
+    $cleanMessage = Limit-MessageText $Message 1400
     if ([string]::IsNullOrWhiteSpace($cleanMessage)) { throw 'Message는 비어 있을 수 없습니다.' }
 
     $event = [ordered]@{
@@ -94,7 +102,7 @@ try {
         title = $cleanTitle
         message = $cleanMessage
         project = Limit-Text $Project 120
-        task = $cleanTitle
+        task = $(if ([string]::IsNullOrWhiteSpace($cleanTitle)) { 'MESSAGE' } else { $cleanTitle })
         workflowStatus = 'MESSAGE'
         outcome = Get-MessageOutcome $Severity
         scope = 'local_phase'

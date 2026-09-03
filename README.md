@@ -1,6 +1,6 @@
 # AI Worker Notifier
 
-Windows에서 AI/자동화 작업이 끝나면 Discord로 알려 주는 작은 PowerShell 도구입니다.
+Windows에서 AI/자동화 작업의 진행 중 메시지와 완료 상태를 Discord로 알려 주는 작은 PowerShell 도구입니다.
 
 작업 결과는 로컬에 먼저 쌓고, 백그라운드 전달기가 Discord Webhook으로 보냅니다. 알림이 실패해도 원래 작업·테스트·Git 결과는 바꾸지 않습니다.
 
@@ -66,19 +66,28 @@ ai-task-complete `
   -NextAction 'VERIFY_DISCORD'
 ```
 
-작업 도중 사용자에게 바로 전달할 메시지는 `ai-notify`를 사용합니다.
+작업 도중 사용자에게 바로 전달할 메시지는 `ai-notify`를 사용합니다. 본문은 에이전트가 쓴 문장을 그대로 우선 표시하고, Project/Agent 같은 기계 메타데이터는 아래 코드블럭으로 분리합니다.
 
 ```powershell
-ai-notify '실기기 확인이 필요합니다.'
-
-ai-notify `
-  -Title '사용자 확인 필요' `
-  -Message 'Windows에서 Pair 버튼을 한 번 눌러 주세요.' `
-  -Severity warning `
-  -AgentRole 'LOCAL_COORDINATOR'
+ai-notify '지금 5초 내로 Windows에서 Pair 버튼을 눌러 주세요.' -Agent ChatGPT
 ```
 
-`ai-notify`는 완료 상태를 만들지 않고 별도 message event를 queue합니다. `Project`를 생략하면 현재 Git 저장소 이름을 자동 감지합니다.
+Discord에서는 설정된 역할 멘션 뒤에 대략 이렇게 표시됩니다.
+
+````text
+@AI-Worker-Notify
+
+지금 5초 내로 Windows에서 Pair 버튼을 눌러 주세요.
+
+```text
+Project: AudioHub
+Agent: ChatGPT
+```
+````
+
+`-Title`은 사람이 읽을 제목이 정말 필요할 때만 선택적으로 사용할 수 있고, 기본 헤더는 붙지 않습니다. `Project`를 생략하면 현재 Git 저장소 이름을 자동 감지합니다. `-Agent`는 기존 `-AgentRole`의 짧은 alias입니다.
+
+`ai-notify`는 완료 상태를 만들지 않고 별도 message event를 queue합니다. 설정된 Discord 역할 멘션이 있으면 기존 `allowed_mentions.roles` 경로로 실제 멘션을 함께 보냅니다.
 
 한글 인수는 **PowerShell에서 직접** 넘기는 편이 안전합니다. `ai-notify.ps1`은 PATH에서 PowerShell ExternalScript로 직접 실행되므로 CMD `%*`를 거치지 않습니다.
 
