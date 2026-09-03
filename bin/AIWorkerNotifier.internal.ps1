@@ -6,7 +6,9 @@ param(
     [int]$PollIntervalSeconds = 1,
     [int]$StartupGraceMinutes = 3,
     [int]$RequestTimeoutSeconds = 8,
-    [int]$MaxSendAttempts = 2
+    [int]$MaxSendAttempts = 2,
+    [Parameter(DontShow = $true)]
+    [string]$RuntimeRoot = ''
 )
 
 Set-StrictMode -Version Latest
@@ -17,7 +19,11 @@ $utf8 = [System.Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = $utf8
 $OutputEncoding = $utf8
 
-$script:RuntimeRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'AIWorkerNotifier'
+if ([string]::IsNullOrWhiteSpace($RuntimeRoot)) {
+    $script:RuntimeRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'AIWorkerNotifier'
+} else {
+    $script:RuntimeRoot = [IO.Path]::GetFullPath($RuntimeRoot)
+}
 $script:StartedAtUtc = [DateTime]::UtcNow
 $script:LogPath = Join-Path $script:RuntimeRoot 'logs\notifier.log'
 $script:SentIndexPath = Join-Path $script:RuntimeRoot 'state\sent-index.json'
@@ -141,8 +147,40 @@ function Validate-Event {
     if ([int]$Event.schemaVersion -ne 1) { throw 'unsupported schemaVersion' }
 }
 
+function Get-OptionalEventText {
+    param($Event, [string]$Name)
+    $property = $Event.PSObject.Properties[$Name]
+    if ($null -eq $property -or $null -eq $property.Value) { return '' }
+    return [string]$property.Value
+}
+
 function Get-DiscordMessage {
     param($Event)
+
+    $eventType = (Get-OptionalEventText $Event 'eventType').ToLowerInvariant()
+    if ($eventType -eq 'message') {
+        $severity = (Get-OptionalEventText $Event 'severity').ToLowerInvariant()
+        $icon = switch ($severity) {
+            'warning' { '⚠️' }
+            'error' { '❌' }
+            default { '💬' }
+        }
+        $title = Sanitize-Text (Get-OptionalEventText $Event 'title') 120
+        $message = Sanitize-Text (Get-OptionalEventText $Event 'message') 1400
+        $project = Sanitize-Text ([string]$Event.project) 120
+        $role = Sanitize-Text (Get-OptionalEventText $Event 'agentRole') 80
+        if ([string]::IsNullOrWhiteSpace($title)) { $title = 'AI 작업 메시지' }
+        if ([string]::IsNullOrWhiteSpace($message)) { $message = Sanitize-Text ([string]$Event.summary) 1400 }
+
+        $lines = [System.Collections.Generic.List[string]]::new()
+        $lines.Add("$icon $title")
+        $lines.Add('')
+        $lines.Add($message)
+        if (-not [string]::IsNullOrWhiteSpace($project)) { $lines.Add("Project: $project") }
+        if (-not [string]::IsNullOrWhiteSpace($role)) { $lines.Add("Agent: $role") }
+        return ($lines -join "`n")
+    }
+
     $outcome = ([string]$Event.outcome).ToLowerInvariant()
     $icon = switch ($outcome) {
         'needs_input' { '⚠️' }

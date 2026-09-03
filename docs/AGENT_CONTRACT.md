@@ -18,9 +18,28 @@ ai-task-complete `
 
 Cursor GUI의 자동 완료 알림은 사용자 전역 `stop` Hook이 소유합니다.
 자세한 설치·모드는 [`CURSOR_INTEGRATION.md`](CURSOR_INTEGRATION.md)를 봅니다.
+
+## 작업 중 사용자 메시지
+
+완료 상태가 아니라 작업 도중 사용자의 확인·입력·주의가 필요할 때는 `ai-notify`를 사용합니다.
+
+```powershell
+ai-notify `
+  -Title '사용자 확인 필요' `
+  -Message '실기기에서 Pair 버튼을 한 번 눌러 주세요.' `
+  -Severity warning `
+  -AgentRole 'LOCAL_COORDINATOR'
+```
+
+- `-Message`만 필수이며 `Title`, `Project`, `Severity`, `AgentRole`, `Source`는 선택입니다.
+- `Project`를 생략하면 현재 Git 저장소 이름을 자동 감지합니다.
+- `Severity`는 `info | warning | error`입니다.
+- message event는 completion event와 별도 identity를 가지므로 `ai-task-complete`의 중복 억제나 최종 상태 의미를 사용하지 않습니다.
+- 알림 전달 실패는 현재 Agent 작업의 성공/실패를 바꾸지 않습니다.
+
 ## 필수 규칙
 
-- 알림 호출 후 현재 dispatch의 코드·테스트·문서·Git 결과를 다시 변경하지 않습니다.
+- `ai-task-complete` 호출 후에는 현재 dispatch의 코드·테스트·문서·Git 결과를 다시 변경하지 않습니다. `ai-notify`는 작업 중 전달용이므로 이 종료 규칙의 대상이 아닙니다.
 - 별도의 다음 dispatch 또는 다음 TASK 진행은 허용합니다.
 - 명령 부재, non-zero, timeout, Notifier 비활성은 원래 작업 상태를 바꾸지 않습니다.
 - Secret, 사용자 데이터, 전체 로그, diff 원문, 로컬 절대경로를 전달하지 않습니다.

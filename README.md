@@ -7,6 +7,7 @@ Windows에서 AI/자동화 작업이 끝나면 Discord로 알려 주는 작은 P
 | 구성 | 역할 |
 |------|------|
 | `ai-task-complete` | 작업 종료 이벤트를 로컬 inbox에 기록 |
+| `ai-notify` | 작업 중 사용자에게 전달할 임의 메시지를 로컬 inbox에 기록 |
 | 알림 전달 (`AIWorkerNotifier`) | inbox를 감시해 Discord로 전송 |
 | Cursor Hook | GUI Agent `stop` 시 `ai-task-complete` 자동 호출 |
 | 설정 메뉴 (`AIWorkerNotifier-Setup.bat`) | Webhook·멘션·ON/OFF·Cursor Hook·테스트를 한곳에서 관리 |
@@ -51,7 +52,7 @@ Cursor GUI 완료 알림:
 
 상세: [`docs/CURSOR_INTEGRATION.md`](docs/CURSOR_INTEGRATION.md)
 
-명령 등록을 하면 새 터미널에서 `ai-task-complete`를 바로 쓸 수 있습니다. PATH 변경은 **새로 연** 터미널부터 적용됩니다.
+명령 등록을 하면 새 터미널에서 `ai-task-complete`, `ai-notify`, `AIWorkerNotifier`를 바로 쓸 수 있습니다. PATH 변경은 **새로 연** 터미널부터 적용됩니다.
 
 ---
 
@@ -65,7 +66,21 @@ ai-task-complete `
   -NextAction 'VERIFY_DISCORD'
 ```
 
-한글 인수는 **PowerShell에서 직접** 넘기는 편이 안전합니다. CMD `%*` 경유는 환경에 따라 깨질 수 있습니다.
+작업 도중 사용자에게 바로 전달할 메시지는 `ai-notify`를 사용합니다.
+
+```powershell
+ai-notify '실기기 확인이 필요합니다.'
+
+ai-notify `
+  -Title '사용자 확인 필요' `
+  -Message 'Windows에서 Pair 버튼을 한 번 눌러 주세요.' `
+  -Severity warning `
+  -AgentRole 'LOCAL_COORDINATOR'
+```
+
+`ai-notify`는 완료 상태를 만들지 않고 별도 message event를 queue합니다. `Project`를 생략하면 현재 Git 저장소 이름을 자동 감지합니다.
+
+한글 인수는 **PowerShell에서 직접** 넘기는 편이 안전합니다. `ai-notify.ps1`은 PATH에서 PowerShell ExternalScript로 직접 실행되므로 CMD `%*`를 거치지 않습니다.
 
 전송 없이 로컬 처리만 확인:
 

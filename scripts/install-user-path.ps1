@@ -24,4 +24,4 @@ if (-not $exists) {
 }
 
 Write-Host '새 PowerShell과 새 Cursor CLI 세션에서 적용됩니다.'
-Write-Host '확인: Get-Command ai-task-complete; Get-Command AIWorkerNotifier'
+Write-Host '확인: Get-Command ai-task-complete; Get-Command ai-notify; Get-Command AIWorkerNotifier'

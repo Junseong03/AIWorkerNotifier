@@ -7,6 +7,7 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $payloadHelper = Join-Path $root 'bin\DiscordPayload.ps1'
 $cliInternal = Join-Path $root 'bin\ai-task-complete.internal.ps1'
+$notifyCli = Join-Path $root 'bin\ai-notify.ps1'
 $notifierInternal = Join-Path $root 'bin\AIWorkerNotifier.internal.ps1'
 . $payloadHelper
 
@@ -21,6 +22,7 @@ function Assert-True {
 foreach ($file in @(
     $payloadHelper,
     $cliInternal,
+    $notifyCli,
     $notifierInternal,
     (Join-Path $root 'scripts\manage-setup.ps1'),
     (Join-Path $root 'scripts\install-cursor-hook.ps1'),
@@ -123,6 +125,43 @@ Assert-True (@($roundTrip.allowed_mentions.roles)[0].ToString() -eq $roleId) 'ro
 # @everyone remains as text in content but is not enabled via parse
 Assert-True ($roundTrip.content -match '@everyone') 'summary @everyone text should remain as text'
 Write-Host 'PASS: UTF-8 JSON round-trip'
+
+# ---------------------------------------------------------------------------
+# Ad-hoc message command (isolated RuntimeRoot; no live Discord)
+# ---------------------------------------------------------------------------
+$messageRuntime = Join-Path $env:TEMP ('AIWorkerNotifier-message-test-' + [Guid]::NewGuid().ToString('N'))
+try {
+    & $notifyCli `
+        -Message '실기기 확인이 필요합니다.' `
+        -Title '사용자 확인 필요' `
+        -Project 'FlowDuck' `
+        -Severity 'warning' `
+        -AgentRole 'LOCAL_COORDINATOR' `
+        -RuntimeRoot $messageRuntime
+
+    $messageFile = Get-ChildItem -LiteralPath (Join-Path $messageRuntime 'inbox') -Filter '*.json' -File |
+        Select-Object -First 1
+    Assert-True ($null -ne $messageFile) 'ai-notify event file missing'
+    $messageEvent = ([IO.File]::ReadAllText($messageFile.FullName, [Text.UTF8Encoding]::new($false))) | ConvertFrom-Json
+    Assert-True ($messageEvent.eventType -eq 'message') 'ai-notify eventType mismatch'
+    Assert-True ($messageEvent.title -eq '사용자 확인 필요') 'ai-notify title mismatch'
+    Assert-True ($messageEvent.message -eq '실기기 확인이 필요합니다.') 'ai-notify message mismatch'
+    Assert-True ($messageEvent.completionKey -like 'message|*') 'ai-notify completion key must be unique message key'
+
+    & $notifierInternal -DryRun -Once -Backlog -RuntimeRoot $messageRuntime | Out-Null
+    $dryRunLog = [IO.File]::ReadAllText(
+        (Join-Path $messageRuntime 'logs\notifier.log'),
+        [Text.UTF8Encoding]::new($false)
+    )
+    Assert-True ($dryRunLog.Contains('사용자 확인 필요')) 'message title missing from delivery dry-run'
+    Assert-True ($dryRunLog.Contains('실기기 확인이 필요합니다.')) 'message body missing from delivery dry-run'
+    Assert-True ($dryRunLog.Contains('Project: FlowDuck')) 'message project missing from delivery dry-run'
+    Assert-True ($dryRunLog.Contains('Agent: LOCAL_COORDINATOR')) 'message agent role missing from delivery dry-run'
+    Assert-True (-not $dryRunLog.Contains('Task:')) 'message delivery must not use completion Task format'
+    Write-Host 'PASS: ai-notify message queue + delivery formatting'
+} finally {
+    Remove-Item -LiteralPath $messageRuntime -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 # ---------------------------------------------------------------------------
 # Event creation smoke (uses .internal.ps1; no live Discord)
