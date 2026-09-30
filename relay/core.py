@@ -182,7 +182,10 @@ class DiscordWebhookProvider:
                 self._webhook_url,
                 data=body,
                 method="POST",
-                headers={"Content-Type": "application/json; charset=utf-8"},
+                headers={
+                    "Content-Type": "application/json; charset=utf-8",
+                    "User-Agent": "AIWorkerNotifier/0.1",
+                },
             )
             try:
                 with self._opener(request, timeout=self._timeout_seconds) as response:
