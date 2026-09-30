@@ -28,7 +28,7 @@ AIWorkerNotifier -Once -Backlog
 AIWorkerNotifier -DryRun -Once -Backlog
 ```
 
-현재 Local Mode provider는 Discord이지만 DryRun은 provider 전송 자체를 생략하는 시험입니다.
+이 DryRun은 아직 남아 있는 `ai-task-complete` compatibility 경로의 provider 전송을 생략하는 시험입니다.
 
 ## 런타임 초기화
 

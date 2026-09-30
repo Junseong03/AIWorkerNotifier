@@ -21,25 +21,24 @@ Cursor GUI의 자동 완료 알림은 사용자 전역 `stop` Hook이 소유합�
 
 ## 작업 중 사용자 메시지
 
-완료 상태가 아니라 작업 도중 사용자의 확인·입력·주의가 필요할 때는 `ai-notify`를 사용합니다. 이 경로는 상태 보고서가 아니라 **사용자에게 보내는 실시간 단방향 메시지**로 취급합니다.
+완료 상태가 아니라 작업 도중 사용자의 확인·입력·주의가 필요할 때는 `notify`를 사용합니다. `notify`는 로컬 inbox를 거치지 않고 공용 Notification Relay API를 호출합니다.
 
 ```powershell
-ai-notify '지금 5초 내로 실기기에서 Pair 버튼을 눌러 주세요.' -Agent ChatGPT
+notify '지금 5초 내로 실기기에서 Pair 버튼을 눌러 주세요.' -Agent ChatGPT
 ```
 
 - 에이전트가 쓴 `Message` 본문을 최우선으로 그대로 표시하고 줄바꿈도 보존합니다.
 - 기본 제목/상태 아이콘을 자동으로 앞에 붙이지 않습니다. `-Title`은 사람이 읽을 제목이 실제로 필요할 때만 사용합니다.
-- `Project`, `Agent`는 본문 아래 `text` 코드블럭에 표시해 본문과 기계 메타데이터를 시각적으로 분리합니다.
-- `-Agent`는 `-AgentRole`의 alias입니다. 에이전트는 가능하면 `ChatGPT`, `Cursor`처럼 자신을 식별해 전달합니다.
+- `Project`, `Agent`는 provider가 표시용 metadata로 사용할 수 있습니다.
+- 에이전트는 가능하면 `ChatGPT`, `Cursor`처럼 자신을 식별해 전달합니다.
 - `Project`를 생략하면 현재 Git 저장소 이름을 자동 감지합니다.
-- Local Mode의 현재 Discord provider에서 역할 멘션이 설정돼 있으면 `ai-notify` 메시지 앞에 실제 role mention을 붙입니다. 이는 provider 동작이며 Agent 계약 자체는 아닙니다.
-- `Severity`는 `info | warning | error` event metadata로 보존하지만 일반 메시지 본문을 덮어쓰지 않습니다.
-- message event는 completion event와 별도 identity를 가지므로 `ai-task-complete`의 중복 억제나 최종 상태 의미를 사용하지 않습니다.
+- `Severity`는 `info | warning | error` metadata로 전달합니다.
+- 메신저별 mention·formatting은 Relay의 Provider Adapter 책임이며 Agent 계약에 포함하지 않습니다.
 - 알림 전달 실패는 현재 Agent 작업의 성공/실패를 바꾸지 않습니다.
 
 ## 필수 규칙
 
-- `ai-task-complete` 호출 후에는 현재 dispatch의 코드·테스트·문서·Git 결과를 다시 변경하지 않습니다. `ai-notify`는 작업 중 전달용이므로 이 종료 규칙의 대상이 아닙니다.
+- `ai-task-complete` 호출 후에는 현재 dispatch의 코드·테스트·문서·Git 결과를 다시 변경하지 않습니다. `notify`는 작업 중 전달용이므로 이 종료 규칙의 대상이 아닙니다.
 - 별도의 다음 dispatch 또는 다음 TASK 진행은 허용합니다.
 - 명령 부재, non-zero, timeout, Notifier 비활성은 원래 작업 상태를 바꾸지 않습니다.
 - Secret, 사용자 데이터, 전체 로그, diff 원문, 로컬 절대경로를 전달하지 않습니다.

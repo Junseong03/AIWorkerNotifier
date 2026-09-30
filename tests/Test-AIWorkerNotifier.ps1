@@ -7,7 +7,7 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $payloadHelper = Join-Path $root 'bin\DiscordPayload.ps1'
 $cliInternal = Join-Path $root 'bin\ai-task-complete.internal.ps1'
-$notifyCli = Join-Path $root 'bin\ai-notify.ps1'
+$notifyCli = Join-Path $root 'bin\notify.ps1'
 $notifierInternal = Join-Path $root 'bin\AIWorkerNotifier.internal.ps1'
 . $payloadHelper
 
@@ -127,42 +127,32 @@ Assert-True ($roundTrip.content -match '@everyone') 'summary @everyone text shou
 Write-Host 'PASS: UTF-8 JSON round-trip'
 
 # ---------------------------------------------------------------------------
-# Ad-hoc message command (isolated RuntimeRoot; no live Discord)
+# notify command contract: relay-only, no local inbox path
 # ---------------------------------------------------------------------------
-$messageRuntime = Join-Path $env:TEMP ('AIWorkerNotifier-message-test-' + [Guid]::NewGuid().ToString('N'))
+$notifySource = [IO.File]::ReadAllText($notifyCli, [Text.UTF8Encoding]::new($false))
+Assert-True ($notifySource.Contains('/api/v1/notifications')) 'notify must call the shared notification API'
+Assert-True ($notifySource.Contains('relay-token')) 'notify must support the standard relay token file'
+Assert-True (-not $notifySource.Contains("'inbox'")) 'notify must not write to the legacy local inbox'
+Assert-True (-not $notifySource.Contains('RuntimeRoot')) 'notify must not depend on the legacy local runtime'
+
+$notifyTestRoot = Join-Path $env:TEMP ('AIWorkerNotifier-notify-test-' + [Guid]::NewGuid().ToString('N'))
 try {
-    $liveMessage = "지금 5초 내로 Pair 버튼을 눌러 주세요.`n완료되면 그대로 진행합니다."
-    & $notifyCli `
-        -Message $liveMessage `
+    New-Item -ItemType Directory -Force -Path $notifyTestRoot | Out-Null
+    $testToken = Join-Path $notifyTestRoot 'relay-token'
+    [IO.File]::WriteAllText($testToken, 'test-token', [Text.UTF8Encoding]::new($false))
+
+    $notifyOutput = (& $notifyCli `
+        -Message 'relay contract smoke' `
         -Project 'FlowDuck' `
         -Agent 'ChatGPT' `
-        -RuntimeRoot $messageRuntime
+        -RelayUrl 'http://127.0.0.1:1' `
+        -TokenFile $testToken 3>&1 | Out-String)
 
-    $messageFile = Get-ChildItem -LiteralPath (Join-Path $messageRuntime 'inbox') -Filter '*.json' -File |
-        Select-Object -First 1
-    Assert-True ($null -ne $messageFile) 'ai-notify event file missing'
-    $messageEvent = ([IO.File]::ReadAllText($messageFile.FullName, [Text.UTF8Encoding]::new($false))) | ConvertFrom-Json
-    Assert-True ($messageEvent.eventType -eq 'message') 'ai-notify eventType mismatch'
-    Assert-True ([string]::IsNullOrWhiteSpace([string]$messageEvent.title)) 'ai-notify default title must be empty'
-    Assert-True ($messageEvent.message -eq $liveMessage) 'ai-notify must preserve message line breaks'
-    Assert-True ($messageEvent.agentRole -eq 'ChatGPT') 'ai-notify -Agent alias mismatch'
-    Assert-True ($messageEvent.completionKey -like 'message|*') 'ai-notify completion key must be unique message key'
-
-    & $notifierInternal -DryRun -Once -Backlog -RuntimeRoot $messageRuntime | Out-Null
-    $dryRunLog = [IO.File]::ReadAllText(
-        (Join-Path $messageRuntime 'logs\notifier.log'),
-        [Text.UTF8Encoding]::new($false)
-    )
-    Assert-True ($dryRunLog.Contains('지금 5초 내로 Pair 버튼을 눌러 주세요.')) 'message first line missing from delivery dry-run'
-    Assert-True ($dryRunLog.Contains('완료되면 그대로 진행합니다.')) 'message second line missing from delivery dry-run'
-    Assert-True ($dryRunLog.Contains('```text')) 'message metadata code block missing'
-    Assert-True ($dryRunLog.Contains('Project: FlowDuck')) 'message project missing from metadata block'
-    Assert-True ($dryRunLog.Contains('Agent: ChatGPT')) 'message agent missing from metadata block'
-    Assert-True (-not $dryRunLog.Contains('AI 작업 메시지')) 'default message header must not be injected'
-    Assert-True (-not $dryRunLog.Contains('Task:')) 'message delivery must not use completion Task format'
-    Write-Host 'PASS: ai-notify conversational body + metadata block formatting'
+    Assert-True ($LASTEXITCODE -eq 0) 'notify transport failure must not change caller exit status'
+    Assert-True ($notifyOutput.Contains('Notification was not delivered')) 'notify transport failure warning missing'
+    Write-Host 'PASS: notify relay-only command contract'
 } finally {
-    Remove-Item -LiteralPath $messageRuntime -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $notifyTestRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 # ---------------------------------------------------------------------------

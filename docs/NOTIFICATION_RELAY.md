@@ -31,7 +31,7 @@ Notification Relay
 
 작업환경은 메신저를 직접 호출하지 않습니다.
 
-호출자가 알아야 하는 것은 Relay URL, Relay Bearer Token, Notification payload뿐입니다. `ai-notify-remote.py` 같은 CLI는 편의 wrapper일 뿐이며 별도 정본 계약을 만들지 않습니다.
+호출자가 알아야 하는 것은 Relay URL, Relay Bearer Token, Notification payload뿐입니다. Windows의 `notify` 명령은 이 API를 호출하는 얇은 편의 wrapper일 뿐이며 별도 정본 계약을 만들지 않습니다.
 
 ### 2. Provider는 Relay 내부 구현이다
 

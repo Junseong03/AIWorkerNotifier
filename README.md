@@ -2,122 +2,86 @@
 
 AI Worker Notifier는 AI/자동화 작업이 사용자에게 진행 상황·완료·실패·확인 요청을 전달하는 **독립 알림 계층**입니다.
 
-현재는 두 가지 실행 경로를 제공합니다.
+사용자-facing 기본 경로는 하나입니다.
 
-- **Windows Local Mode** — 로컬 inbox와 watcher를 사용해 Discord로 전달
-- **Headless Relay Mode** — OCI 같은 상시 실행 Host가 HTTP API를 받아 Discord로 전달
+```text
+notify "메시지"
+        ↓
+공용 Notification Relay API
+        ↓
+Provider Adapter
+        ↓
+Discord (현재)
+```
 
-알림이 실패해도 원래 작업·테스트·Git 결과는 바꾸지 않습니다. Agent나 프로젝트는 Discord Webhook을 직접 알 필요가 없고, Headless Mode에서는 공용 Notification API만 호출합니다.
+`notify`는 로컬 inbox나 Windows watcher를 거치지 않습니다. Tailnet에 연결된 PC에서 Relay Bearer Token을 읽어 OCI의 공용 API를 직접 호출합니다. API가 정본 인터페이스이고 CLI는 얇은 편의 wrapper입니다.
 
 | 구성 | 역할 |
 |------|------|
-| `ai-task-complete` | 작업 종료 이벤트를 로컬 inbox에 기록 |
-| `ai-notify` | 작업 중 사용자에게 전달할 임의 메시지를 로컬 inbox에 기록 |
-| `AIWorkerNotifier` | Windows inbox를 감시해 provider로 전달 |
-| Headless Relay API | Tailnet의 여러 작업환경에서 공용 알림 요청을 수신 |
-| `ai-notify-remote.py` | 공용 API를 편하게 호출하는 선택적 CLI wrapper |
-| Cursor Hook | GUI Agent `stop` 시 `ai-task-complete` 자동 호출 |
-| 설정 메뉴 (`AIWorkerNotifier-Setup.bat`) | Webhook·멘션·ON/OFF·Cursor Hook·테스트를 한곳에서 관리 |
+| `notify` | 공용 Relay API로 사용자 메시지 전송 |
+| Headless Relay API | Tailnet의 여러 작업환경에서 공용 알림 요청 수신 |
+| Provider Adapter | 공용 notification을 Discord 등 실제 메신저 형식으로 변환 |
+| `ai-task-complete` | 기존 자동 완료 통합용 compatibility 경로 |
+| Cursor Hook | GUI Agent `stop` 시 기존 완료 이벤트 자동 호출 |
 
-현재 provider 구현은 **Discord**입니다. Relay API와 호출자는 provider에 종속되지 않도록 유지하며, 이후 다른 메신저 provider를 추가할 수 있습니다.
+현재 provider 구현은 **Discord**입니다. 호출자와 API 계약은 provider-neutral하게 유지하며 이후 Slack·Telegram·Teams 등으로 확장할 수 있습니다.
 
-요구 환경은 실행 모드에 따라 다릅니다. Windows Local Mode는 **Windows + PowerShell 5.1+**, Headless Relay Mode는 현재 **Python 3.9+**에서 동작합니다.
+알림 실패는 원래 작업·테스트·Git 결과를 바꾸지 않습니다.
 
 ---
 
-## 1분 시작
+## 1분 시작 — Windows
 
-1. 이 저장소를 원하는 폴더에 둡니다. (예: `C:\dev\SW\AIWorkerNotifier`)
-2. `AIWorkerNotifier-Setup.bat`를 실행합니다.
-3. **Webhook 설정** → Discord Webhook URL 입력  
-4. (선택) **역할 멘션 설정** → 역할 ID 저장  
-5. **알림 전달 ON/OFF** → `ON` (초록)
-6. **알림 테스트**로 Discord에 실제로 오는지 확인
+전제:
 
-메뉴 구성:
+- PC가 Relay Host와 같은 Tailnet에 연결돼 있음
+- Relay Token이 `$HOME\.config\ai-worker-notifier\relay-token`에 있음
+- 이 저장소의 `bin`을 PATH에 등록함
 
-```text
-알림 전달   ON / OFF
-Webhook     연결됨 / 없음
-역할 멘션   설정됨 / 없음
-명령 등록   등록됨 / 미등록
-Cursor Hook 설치됨 / 미설치
-
-1. 알림 전달 ON/OFF
-2. Webhook 설정
-3. 역할 멘션 설정
-4. 알림 테스트   (@역할 / @사용자 / @everyone)
-5. 명령 등록
-6. Cursor Hook
-0. 나가기
-```
-
-Cursor GUI 완료 알림:
-
-```powershell
-.\scripts\install-cursor-hook.ps1
-.\scripts\set-cursor-hook-mode.ps1 -Mode always
-```
-
-상세: [`docs/CURSOR_INTEGRATION.md`](docs/CURSOR_INTEGRATION.md)
-
-명령 등록을 하면 새 터미널에서 `ai-task-complete`, `ai-notify`, `AIWorkerNotifier`를 바로 쓸 수 있습니다. PATH 변경은 **새로 연** 터미널부터 적용됩니다.
-
----
-
-## 사용 예
-
-```powershell
-ai-task-complete `
-  -Task 'TEST-001' `
-  -Status 'AUDIT_COMPLETE' `
-  -Summary '설치 시험 완료' `
-  -NextAction 'VERIFY_DISCORD'
-```
-
-작업 도중 사용자에게 바로 전달할 메시지는 `ai-notify`를 사용합니다. 본문은 에이전트가 쓴 문장을 그대로 우선 표시하고, Project/Agent 같은 기계 메타데이터는 아래 코드블럭으로 분리합니다.
-
-```powershell
-ai-notify '지금 5초 내로 Windows에서 Pair 버튼을 눌러 주세요.' -Agent ChatGPT
-```
-
-Discord에서는 설정된 역할 멘션 뒤에 대략 이렇게 표시됩니다.
-
-````text
-@AI-Worker-Notify
-
-지금 5초 내로 Windows에서 Pair 버튼을 눌러 주세요.
-
-```text
-Project: AudioHub
-Agent: ChatGPT
-```
-````
-
-`-Title`은 사람이 읽을 제목이 정말 필요할 때만 선택적으로 사용할 수 있고, 기본 헤더는 붙지 않습니다. `Project`를 생략하면 현재 Git 저장소 이름을 자동 감지합니다. `-Agent`는 기존 `-AgentRole`의 짧은 alias입니다.
-
-`ai-notify`는 완료 상태를 만들지 않고 별도 message event를 queue합니다. 설정된 Discord 역할 멘션이 있으면 기존 `allowed_mentions.roles` 경로로 실제 멘션을 함께 보냅니다.
-
-한글 인수는 **PowerShell에서 직접** 넘기는 편이 안전합니다. `ai-notify.ps1`은 PATH에서 PowerShell ExternalScript로 직접 실행되므로 CMD `%*`를 거치지 않습니다.
-
-전송 없이 로컬 처리만 확인:
-
-```powershell
-AIWorkerNotifier -DryRun -Once -Backlog
-```
-
-스크립트로만 설정할 때:
+명령 등록:
 
 ```powershell
 cd 'C:\dev\SW\AIWorkerNotifier'
 .\scripts\install-user-path.ps1
-.\scripts\set-discord-webhook.ps1
-AIWorkerNotifier   # 또는 설정 메뉴에서 ON
 ```
+
+새 PowerShell을 연 뒤:
+
+```powershell
+notify "작업이 끝났습니다."
+```
+
+메타데이터가 필요하면:
+
+```powershell
+notify "실기기 확인이 필요합니다." `
+  -Project AudioHub `
+  -Agent ChatGPT `
+  -Severity warning
+```
+
+`Project`를 생략하면 현재 Git 저장소 이름을 자동 감지합니다.
+
+### Relay Token 배치
+
+Windows에서 Taildrop로 받은 token은 보통 `$HOME\Downloads\relay-token`에 들어옵니다.
+
+```powershell
+New-Item -ItemType Directory -Force "$HOME\.config\ai-worker-notifier" | Out-Null
+Move-Item "$HOME\Downloads\relay-token" "$HOME\.config\ai-worker-notifier\relay-token"
+```
+
+토큰 값을 명령줄이나 채팅에 직접 붙여넣지 않는 것을 권장합니다.
+
+### 기존 완료 통합
+
+Cursor Hook과 `ai-task-complete` 기반 자동 완료 알림은 아직 compatibility 경로로 남아 있습니다. 일반 사용자 메시지는 새 `notify` 명령만 사용합니다.
+
+상세: [`docs/CURSOR_INTEGRATION.md`](docs/CURSOR_INTEGRATION.md)
 
 ## 공용 Headless Relay API
 
-항상 켜진 OCI 같은 Host에서는 Windows inbox/watcher 없이 독립 Relay API만 실행할 수 있습니다. **HTTP API가 정본 인터페이스**이고 `bin/ai-notify-remote.py`는 그 API를 편하게 호출하는 선택적 wrapper입니다.
+항상 켜진 OCI 같은 Host에서는 독립 Relay API를 실행합니다. **HTTP API가 정본 인터페이스**이고 Windows의 `notify` 명령은 그 API를 호출하는 얇은 wrapper입니다.
 
 ```text
 Agent / CI / Script / App
@@ -151,22 +115,28 @@ POST /api/v1/notifications
 }
 ```
 
-직접 API 호출:
+Windows에서는 보통 직접 API를 작성하지 않고 다음 명령을 사용합니다.
 
-```bash
-curl -X POST 'https://<tailnet-host>:8771/api/v1/notifications' \
-  -H 'Authorization: Bearer <relay-token>' \
-  -H 'Content-Type: application/json' \
-  -d '{"message":"테스트가 끝났습니다.","project":"AudioHub","agent":"integration"}'
+```powershell
+notify "테스트가 끝났습니다." -Project AudioHub -Agent integration
 ```
 
-선택적 CLI wrapper:
+API를 직접 호출해야 한다면 PowerShell에서는 `Invoke-RestMethod`를 사용합니다.
 
-```bash
-AI_WORKER_NOTIFIER_RELAY_URL='https://<tailnet-host>:8771' \
-AI_WORKER_NOTIFIER_RELAY_TOKEN_FILE='~/.config/ai-worker-notifier/relay-token' \
-python3 bin/ai-notify-remote.py '테스트가 끝났습니다.' --project AudioHub --agent integration
+```powershell
+$token = (Get-Content "$HOME\.config\ai-worker-notifier\relay-token" -Raw).Trim()
+$headers = @{ Authorization = "Bearer $token" }
+$body = @{ message = "테스트가 끝났습니다." } | ConvertTo-Json
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri 'https://<tailnet-host>:8771/api/v1/notifications' `
+  -Headers $headers `
+  -ContentType 'application/json; charset=utf-8' `
+  -Body $body
 ```
+
+Windows PowerShell 5.1에서 `curl`은 `Invoke-WebRequest` alias일 수 있으므로 Unix용 `curl -X ...` 예제를 그대로 붙여 넣지 않습니다.
 
 접근 조건은 **Tailnet 연결 + Relay Bearer Token**입니다. `/health`는 인증 없이 확인할 수 있지만 `/api/v1/status`와 `/api/v1/notifications`는 Bearer token을 요구합니다.
 
@@ -176,7 +146,9 @@ Provider-neutral 구조와 향후 메신저 확장 원칙은 [`docs/NOTIFICATION
 
 ---
 
-## 동작 요약
+## 기존 완료 통합의 동작 요약
+
+일반 메시지 `notify`는 아래 로컬 경로를 사용하지 않습니다. 다음 내용은 아직 유지 중인 `ai-task-complete` / Cursor 완료 compatibility 경로에만 해당합니다.
 
 1. `ai-task-complete`가 이벤트를 `%LOCALAPPDATA%\AIWorkerNotifier\inbox`에 `.tmp` → `.json`으로 원자적 기록합니다.
 2. 알림 전달이 `ON`이면 inbox를 읽어 Discord로 보냅니다.
@@ -261,7 +233,7 @@ AI Worker Notifier는 AI 작업의 실행 정책을 관리하는 도구가 아�
 ## 보안
 
 - **Provider credential을 Git에 커밋하지 마세요.** Discord Webhook, 향후 Slack/Telegram token 등은 모두 같은 원칙을 적용합니다.
-- Windows Local Mode는 Discord Webhook을 `%LOCALAPPDATA%`의 DPAPI 파일에 저장합니다. Headless Relay는 provider credential과 relay token을 owner-only 파일로 보관합니다.
+- 기존 `ai-task-complete` compatibility 경로의 Discord Webhook은 `%LOCALAPPDATA%`의 DPAPI 파일에 저장합니다. Headless Relay는 provider credential과 relay token을 owner-only 파일로 보관합니다.
 - 공개 저장소에 올릴 때는 노출된 credential을 즉시 폐기·재발급하고 Git 히스토리에 비밀이 없는지 확인하세요.
 
 자세한 정책: [`docs/SECURITY.md`](docs/SECURITY.md)
