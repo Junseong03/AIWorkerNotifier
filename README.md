@@ -1,18 +1,27 @@
 # AI Worker Notifier
 
-Windows에서 AI/자동화 작업의 진행 중 메시지와 완료 상태를 Discord로 알려 주는 작은 PowerShell 도구입니다.
+AI Worker Notifier는 AI/자동화 작업이 사용자에게 진행 상황·완료·실패·확인 요청을 전달하는 **독립 알림 계층**입니다.
 
-작업 결과는 로컬에 먼저 쌓고, 백그라운드 전달기가 Discord Webhook으로 보냅니다. 알림이 실패해도 원래 작업·테스트·Git 결과는 바꾸지 않습니다.
+현재는 두 가지 실행 경로를 제공합니다.
+
+- **Windows Local Mode** — 로컬 inbox와 watcher를 사용해 Discord로 전달
+- **Headless Relay Mode** — OCI 같은 상시 실행 Host가 HTTP API를 받아 Discord로 전달
+
+알림이 실패해도 원래 작업·테스트·Git 결과는 바꾸지 않습니다. Agent나 프로젝트는 Discord Webhook을 직접 알 필요가 없고, Headless Mode에서는 공용 Notification API만 호출합니다.
 
 | 구성 | 역할 |
 |------|------|
 | `ai-task-complete` | 작업 종료 이벤트를 로컬 inbox에 기록 |
 | `ai-notify` | 작업 중 사용자에게 전달할 임의 메시지를 로컬 inbox에 기록 |
-| 알림 전달 (`AIWorkerNotifier`) | inbox를 감시해 Discord로 전송 |
+| `AIWorkerNotifier` | Windows inbox를 감시해 provider로 전달 |
+| Headless Relay API | Tailnet의 여러 작업환경에서 공용 알림 요청을 수신 |
+| `ai-notify-remote.py` | 공용 API를 편하게 호출하는 선택적 CLI wrapper |
 | Cursor Hook | GUI Agent `stop` 시 `ai-task-complete` 자동 호출 |
 | 설정 메뉴 (`AIWorkerNotifier-Setup.bat`) | Webhook·멘션·ON/OFF·Cursor Hook·테스트를 한곳에서 관리 |
 
-요구 환경: **Windows**, **PowerShell 5.1+**
+현재 provider 구현은 **Discord**입니다. Relay API와 호출자는 provider에 종속되지 않도록 유지하며, 이후 다른 메신저 provider를 추가할 수 있습니다.
+
+요구 환경은 실행 모드에 따라 다릅니다. Windows Local Mode는 **Windows + PowerShell 5.1+**, Headless Relay Mode는 현재 **Python 3.9+**에서 동작합니다.
 
 ---
 
@@ -106,9 +115,24 @@ cd 'C:\dev\SW\AIWorkerNotifier'
 AIWorkerNotifier   # 또는 설정 메뉴에서 ON
 ```
 
-### 공용 Headless API
+## 공용 Headless Relay API
 
-항상 켜진 OCI 같은 Host에서는 Windows inbox/watcher 없이 독립 Relay API만 실행할 수 있습니다. API가 정본 인터페이스이고 `bin/ai-notify-remote.py`는 선택적인 얇은 wrapper입니다.
+항상 켜진 OCI 같은 Host에서는 Windows inbox/watcher 없이 독립 Relay API만 실행할 수 있습니다. **HTTP API가 정본 인터페이스**이고 `bin/ai-notify-remote.py`는 그 API를 편하게 호출하는 선택적 wrapper입니다.
+
+```text
+Agent / CI / Script / App
+        │
+        │ HTTPS + Bearer token
+        ▼
+Notification Relay API
+        │
+        ▼
+Provider Adapter
+        │
+        └─ Discord (현재)
+```
+
+API:
 
 ```text
 GET  /health
@@ -116,7 +140,18 @@ GET  /api/v1/status
 POST /api/v1/notifications
 ```
 
-`POST /api/v1/notifications`의 필수 필드는 `message` 하나이며 `title`, `project`, `agent`, `severity`, `source`는 선택입니다. `status`와 `notifications`는 `Authorization: Bearer <relay-token>`을 요구합니다.
+`POST /api/v1/notifications`의 필수 필드는 `message` 하나입니다. `title`, `project`, `agent`, `severity`, `source`는 선택입니다.
+
+```json
+{
+  "message": "테스트가 끝났습니다.",
+  "project": "AudioHub",
+  "agent": "integration",
+  "severity": "info"
+}
+```
+
+직접 API 호출:
 
 ```bash
 curl -X POST 'https://<tailnet-host>:8771/api/v1/notifications' \
@@ -125,7 +160,19 @@ curl -X POST 'https://<tailnet-host>:8771/api/v1/notifications' \
   -d '{"message":"테스트가 끝났습니다.","project":"AudioHub","agent":"integration"}'
 ```
 
-Relay backend는 `127.0.0.1:8771`에만 bind하고 Tailscale Serve를 통해 tailnet에 노출하는 구성을 권장합니다. Discord Webhook은 caller가 알 필요가 없습니다.
+선택적 CLI wrapper:
+
+```bash
+AI_WORKER_NOTIFIER_RELAY_URL='https://<tailnet-host>:8771' \
+AI_WORKER_NOTIFIER_RELAY_TOKEN_FILE='~/.config/ai-worker-notifier/relay-token' \
+python3 bin/ai-notify-remote.py '테스트가 끝났습니다.' --project AudioHub --agent integration
+```
+
+접근 조건은 **Tailnet 연결 + Relay Bearer Token**입니다. `/health`는 인증 없이 확인할 수 있지만 `/api/v1/status`와 `/api/v1/notifications`는 Bearer token을 요구합니다.
+
+Relay backend는 `127.0.0.1:8771`에만 bind하고 Tailscale Serve 같은 private ingress를 통해 노출하는 구성을 권장합니다. Discord Webhook 같은 provider credential은 Relay Host만 소유하며 caller에게 배포하지 않습니다.
+
+Provider-neutral 구조와 향후 메신저 확장 원칙은 [`docs/NOTIFICATION_RELAY.md`](docs/NOTIFICATION_RELAY.md)를 참고하세요.
 
 ---
 
@@ -182,21 +229,22 @@ AI Worker Notifier는 AI 작업의 실행 정책을 관리하는 도구가 아�
 ### 1. 안정성과 진단 개선
 
 - Cursor Hook 입력 형식과 인코딩 회귀 테스트 유지
-- Queue·Watcher·Discord 단계별 상태 확인 개선
+- Local Queue·Watcher·Headless Relay·Provider 단계별 상태 확인 개선
 - 민감정보를 남기지 않는 진단 로그와 오류 분류
 - 설치·업데이트 후 자동 점검 명령 제공
 
 ### 2. IDE·에이전트 통합 확대
 
 - Cursor 외 IDE와 CLI Adapter 추가
-- 공통 `ai-task-complete` 계약을 통한 통합
+- 공통 `ai-task-complete` / Notification API 계약을 통한 통합
 - IDE별 구현은 얇은 Adapter로 유지
-- Queue·Credential·Discord 전송 구현은 재사용
+- Agent가 provider credential이나 메신저별 API를 직접 알지 않도록 유지
 
-### 3. 알림 라우팅과 사용자 경험
+### 3. Provider와 알림 라우팅 확장
 
-- 프로젝트별 Webhook·채널 라우팅
-- 알림 중요도와 상태별 표시 개선
+- Discord 외 Slack·Telegram·Teams 등 Provider Adapter 추가 가능
+- 공용 Notification API는 provider-neutral 상태로 유지
+- 필요가 생기면 프로젝트·중요도·상태에 따른 Relay routing policy 도입
 - 트레이 UI와 전달 상태 확인
 - 설정 백업·복원과 안전한 업데이트
 
@@ -212,9 +260,9 @@ AI Worker Notifier는 AI 작업의 실행 정책을 관리하는 도구가 아�
 
 ## 보안
 
-- **Webhook URL·역할 ID를 Git에 커밋하지 마세요.**
-- 이 프로젝트는 `.env`에 비밀을 두지 않습니다. 자격 증명은 `%LOCALAPPDATA%`의 DPAPI 파일(또는 사용자 환경 변수)을 씁니다.
-- 공개 저장소에 올릴 때는 Webhook을 재발급하고, 히스토리에 비밀이 없는지 확인하세요.
+- **Provider credential을 Git에 커밋하지 마세요.** Discord Webhook, 향후 Slack/Telegram token 등은 모두 같은 원칙을 적용합니다.
+- Windows Local Mode는 Discord Webhook을 `%LOCALAPPDATA%`의 DPAPI 파일에 저장합니다. Headless Relay는 provider credential과 relay token을 owner-only 파일로 보관합니다.
+- 공개 저장소에 올릴 때는 노출된 credential을 즉시 폐기·재발급하고 Git 히스토리에 비밀이 없는지 확인하세요.
 
 자세한 정책: [`docs/SECURITY.md`](docs/SECURITY.md)
 
@@ -229,6 +277,7 @@ AI Worker Notifier는 AI 작업의 실행 정책을 관리하는 도구가 아�
 | [`docs/AGENT_CONTRACT.md`](docs/AGENT_CONTRACT.md) | 에이전트 호출 계약 |
 | [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | 운영·장애 처리 |
 | [`docs/SECURITY.md`](docs/SECURITY.md) | Secret·로그 정책 |
+| [`docs/NOTIFICATION_RELAY.md`](docs/NOTIFICATION_RELAY.md) | 공용 Relay API·Provider-neutral 아키텍처 |
 | [`docs/PROJECT_INTEGRATION.md`](docs/PROJECT_INTEGRATION.md) | 다른 프로젝트 연동 원칙 |
 
 테스트: `.\tests\Test-AIWorkerNotifier.ps1`, `.\tests\Test-CursorHookIntegration.ps1`

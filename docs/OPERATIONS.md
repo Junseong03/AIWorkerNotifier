@@ -22,11 +22,13 @@ AIWorkerNotifier -Backlog
 AIWorkerNotifier -Once -Backlog
 ```
 
-## Discord 없이 시험
+## Provider 전송 없이 시험
 
 ```powershell
 AIWorkerNotifier -DryRun -Once -Backlog
 ```
+
+현재 Local Mode provider는 Discord이지만 DryRun은 provider 전송 자체를 생략하는 시험입니다.
 
 ## 런타임 초기화
 
@@ -42,7 +44,9 @@ Linux/OCI에서는 저장소 루트에서 다음 설치 스크립트를 사용�
 sh scripts/install-headless-relay-systemd.sh
 ```
 
-기본 backend는 `127.0.0.1:8771`이고 user systemd service `ai-worker-notifier-relay.service`로 실행됩니다. `~/.config/ai-worker-notifier/relay-token`은 자동 생성되며 Discord Webhook은 `~/.config/ai-worker-notifier/discord-webhook.url`에 owner-only 권한으로 둡니다.
+기본 backend는 `127.0.0.1:8771`이고 user systemd service `ai-worker-notifier-relay.service`로 실행됩니다. `~/.config/ai-worker-notifier/relay-token`은 자동 생성됩니다. 현재 Discord provider의 credential은 `~/.config/ai-worker-notifier/discord-webhook.url`에 owner-only 권한으로 둡니다.
+
+원격 client는 Tailnet 연결과 Relay Bearer Token이 모두 필요합니다. Provider credential은 원격 client에 배포하지 않습니다.
 
 상태 확인:
 

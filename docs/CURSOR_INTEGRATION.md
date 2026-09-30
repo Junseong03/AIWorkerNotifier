@@ -90,5 +90,5 @@ integrations/<ide>/...
 scripts/install-<ide>-hook.ps1
 ```
 
-공통 Queue·Discord·Credential은 재구현하지 말고 기존 `ai-task-complete`을
-호출하세요.
+공통 Queue·전달·Provider Credential은 재구현하지 말고 기존 `ai-task-complete`을
+호출하세요. Headless 환경에서는 별도 메신저 API를 직접 붙이지 말고 공용 Notification Relay API를 사용합니다.

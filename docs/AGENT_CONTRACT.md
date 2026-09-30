@@ -32,7 +32,7 @@ ai-notify '지금 5초 내로 실기기에서 Pair 버튼을 눌러 주세요.' 
 - `Project`, `Agent`는 본문 아래 `text` 코드블럭에 표시해 본문과 기계 메타데이터를 시각적으로 분리합니다.
 - `-Agent`는 `-AgentRole`의 alias입니다. 에이전트는 가능하면 `ChatGPT`, `Cursor`처럼 자신을 식별해 전달합니다.
 - `Project`를 생략하면 현재 Git 저장소 이름을 자동 감지합니다.
-- 설정된 Discord 역할 멘션이 있으면 모든 `ai-notify` 메시지 앞에 실제 role mention을 붙입니다.
+- Local Mode의 현재 Discord provider에서 역할 멘션이 설정돼 있으면 `ai-notify` 메시지 앞에 실제 role mention을 붙입니다. 이는 provider 동작이며 Agent 계약 자체는 아닙니다.
 - `Severity`는 `info | warning | error` event metadata로 보존하지만 일반 메시지 본문을 덮어쓰지 않습니다.
 - message event는 completion event와 별도 identity를 가지므로 `ai-task-complete`의 중복 억제나 최종 상태 의미를 사용하지 않습니다.
 - 알림 전달 실패는 현재 Agent 작업의 성공/실패를 바꾸지 않습니다.

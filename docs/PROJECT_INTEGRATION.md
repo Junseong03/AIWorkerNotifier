@@ -4,12 +4,13 @@ Notifier 자체를 먼저 독립적으로 검증한 뒤 프로젝트 workflow를
 
 권장 순서:
 
-1. Notifier 설치 및 수동 Discord 시험
-2. 프로젝트의 현재 TASK/HotFix 감사 완료
-3. workflow 문서에 notification 계약 추가
-4. Cursor LOCAL_COORDINATOR 종료 알림 시험
-5. Orca wrapper 종료 알림 시험
-6. workflow-only 커밋
+1. Notifier 설치 및 실제 provider delivery 시험
+2. Headless 사용 시 Tailnet + Relay Token + `POST /api/v1/notifications` 경로 확인
+3. 프로젝트의 현재 TASK/HotFix 감사 완료
+4. workflow 문서에 notification 계약 추가
+5. Cursor LOCAL_COORDINATOR 종료 알림 시험
+6. Orca wrapper 종료 알림 시험
+7. workflow-only 커밋
 
 Epub Viewer 후보 파일:
 
