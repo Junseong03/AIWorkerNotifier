@@ -1,7 +1,10 @@
 # 보안
 
 - Webhook URL은 Secret입니다.
-- 기본 저장은 현재 Windows 사용자 DPAPI 암호화 파일입니다.
+- Windows Desktop 기본 저장은 현재 사용자 DPAPI 암호화 파일입니다.
+- Headless POSIX Relay는 Webhook과 relay token을 owner-only 파일(`0600`)로 저장하고 config directory는 `0700`으로 유지합니다.
+- Headless Relay backend는 loopback에만 bind하고, 원격 노출은 Tailscale Serve 같은 private ingress를 사용합니다.
+- `status`와 `notifications` API는 별도 relay bearer token을 요구합니다.
 - Discord 멘션 역할 ID는 Secret이 아니지만 Git에 넣지 않고
   `%LOCALAPPDATA%\AIWorkerNotifier\state\discord-mention-role.id`에만 둡니다.
 - `AI_WORKER_NOTIFIER_WEBHOOK_URL` 환경 변수도 지원하지만 프로세스 덤프나 환경 출력에 노출될 수 있습니다.

@@ -106,6 +106,27 @@ cd 'C:\dev\SW\AIWorkerNotifier'
 AIWorkerNotifier   # 또는 설정 메뉴에서 ON
 ```
 
+### 공용 Headless API
+
+항상 켜진 OCI 같은 Host에서는 Windows inbox/watcher 없이 독립 Relay API만 실행할 수 있습니다. API가 정본 인터페이스이고 `bin/ai-notify-remote.py`는 선택적인 얇은 wrapper입니다.
+
+```text
+GET  /health
+GET  /api/v1/status
+POST /api/v1/notifications
+```
+
+`POST /api/v1/notifications`의 필수 필드는 `message` 하나이며 `title`, `project`, `agent`, `severity`, `source`는 선택입니다. `status`와 `notifications`는 `Authorization: Bearer <relay-token>`을 요구합니다.
+
+```bash
+curl -X POST 'https://<tailnet-host>:8771/api/v1/notifications' \
+  -H 'Authorization: Bearer <relay-token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"테스트가 끝났습니다.","project":"AudioHub","agent":"integration"}'
+```
+
+Relay backend는 `127.0.0.1:8771`에만 bind하고 Tailscale Serve를 통해 tailnet에 노출하는 구성을 권장합니다. Discord Webhook은 caller가 알 필요가 없습니다.
+
 ---
 
 ## 동작 요약
